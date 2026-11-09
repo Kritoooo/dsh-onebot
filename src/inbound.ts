@@ -19,7 +19,7 @@ import { extForInboundName } from './media.js'
 import type { Transcriber } from './stt.js'
 import { transcriptLabel } from './stt.js'
 import type { OneBotSegment, MediaRef } from './cq.js'
-import { cqUnescape, detectExplicitMention, detectMention, parseMessage, segmentText, stripLeadingBotMention } from './cq.js'
+import { cqUnescape, detectExplicitMention, detectMention, parseMessage, stripLeadingBotMention } from './cq.js'
 import type { AccessPolicyConfig, ChatId, UserRole } from './chat.js'
 import {
   buildChatId, buildGroupMessagePrefix, classifyUserRole, dmAllowed, groupAllowed,
@@ -174,7 +174,7 @@ export interface InboundContext {
   buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>
   /** Quote expansion via the overridable bridge facade; a verified response
    * is reused for reply-only triggers instead of querying the same id twice. */
-  expandQuote(messageId: string, verifiedData?: QuotedMessageData): Promise<string>
+  expandQuote(messageId: string, verifiedData?: QuotedMessageData, chatId?: ChatId): Promise<string>
   /** Turn dispatch — bridge-owned orchestration (ensureChat + per-turn prefixes). */
   dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>
   /** T2 (P1): busy-turn policy seam — invoked for every non-command message
@@ -202,7 +202,7 @@ export interface InboundContext {
   /** The only config fields the inbound pipeline reads. The W2-② dedup
    * window rides as an optional intersection member so the bridge's
    * BridgeConfig type stays untouched (absent → the default window). */
-  config: Pick<BridgeConfig, 'botQQ' | 'ignoreSelf' | 'requireMention' | 'rateLimitPerMinute' | 'restrictedMemberPrefix' | 'maxInboundFileBytes' | 'notices'> & Partial<{
+  config: Pick<BridgeConfig, 'botQQ' | 'ignoreSelf' | 'requireMention' | 'rateLimitPerMinute' | 'maxQuoteDepth' | 'restrictedMemberPrefix' | 'maxInboundFileBytes' | 'notices'> & Partial<{
     /** W2-② (chatId, message_id) dedup window in seconds; 0 disables. */
     dedupWindowSeconds: number
   }>
@@ -363,7 +363,7 @@ export class InboundPipeline {
     let quote = ''
     if (inbound.replyId !== undefined) {
       // Keep the bridge's expansion seam while reusing this message's lookup.
-      quote = await this.ctx.expandQuote(inbound.replyId, verifiedQuote)
+      quote = await this.ctx.expandQuote(inbound.replyId, verifiedQuote, chatId)
     }
     let forward = ''
     if (inbound.forwardId !== undefined) {
@@ -506,6 +506,7 @@ export class InboundPipeline {
     text: string,
     media: MediaRef[],
     chatId: ChatId,
+    rememberImage = true,
   ): Promise<string> {
     if (media.length === 0) return text
     let out = text
@@ -513,7 +514,7 @@ export class InboundPipeline {
       const placeholder = placeholderFor(ref)
       const idx = out.indexOf(placeholder)
       // idx<0：占位符在文本里找不到（如手打的相同标签已先行被消费），跳过失败回退，原文保持不动。
-      const annotation = await this.resolveMediaRef(ref, chatId)
+      const annotation = await this.resolveMediaRef(ref, chatId, rememberImage)
       if (idx >= 0 && annotation !== '') {
         out = out.slice(0, idx) + annotation + out.slice(idx + placeholder.length)
       } else if (idx >= 0) {
@@ -531,7 +532,7 @@ export class InboundPipeline {
   }
 
   /** Resolve one media ref to a text annotation with a local path. */
-  async resolveMediaRef(ref: MediaRef, chatId: ChatId): Promise<string> {
+  async resolveMediaRef(ref: MediaRef, chatId: ChatId, rememberImage = true): Promise<string> {
     if (ref.kind === 'file') {
       return await this.resolveNasFile(ref, chatId)
     }
@@ -557,9 +558,11 @@ export class InboundPipeline {
       case 'image':
         // Remember the most recent inbound image for /ocr (survives /new);
         // consume the pre-routing pending ref so /ocr never re-resolves it.
-        const settings = this.ctx.getSettings(chatId)
-        settings.lastImagePath = resolved.path
-        settings.pendingImageRef = undefined
+        if (rememberImage) {
+          const settings = this.ctx.getSettings(chatId)
+          settings.lastImagePath = resolved.path
+          settings.pendingImageRef = undefined
+        }
         return (ref.stickerLabel !== undefined ? '[表情包:' : '[图片:') + resolved.path + ']'
       case 'voice': {
         // M3-D4c: dispatch must not wait on STT — the [语音] placeholder ships
@@ -599,31 +602,56 @@ export class InboundPipeline {
    * Expand a quote through get_msg, or reuse its already verified response.
    * @param messageId - quoted OneBot message id.
    * @param verifiedData - optional response fetched by this inbound message's gate.
+   * @param chatId - owning chat; enables guarded image resolution. Legacy callers remain text-only.
    * @returns the existing [引用] text, or an empty string when expansion fails.
    */
-  async expandQuote(messageId: string, verifiedData?: QuotedMessageData): Promise<string> {
-    const numericId = numericReplyId(messageId)
-    if (numericId === undefined) {
-      // An invalid quote must not block explicit @ / private entry points;
-      // omit only its expansion and avoid an unusable get_msg request.
-      this.ctx.log('debug', TRACE_REASONS.quoteInvalidId)
-      currentTrace()?.emit('quote', { ok: false, reason: TRACE_REASONS.quoteInvalidId })
-      return ''
+  async expandQuote(messageId: string, verifiedData?: QuotedMessageData, chatId?: ChatId): Promise<string> {
+    const configured = this.ctx.config.maxQuoteDepth ?? 1
+    const limit = Number.isFinite(configured) ? Math.max(0, Math.min(5, Math.floor(configured))) : 1
+    const visited = new Set<number>()
+    const parts: string[] = []
+    let nextId: string | undefined = messageId
+    for (let depth = 0; nextId !== undefined && depth < limit; depth++) {
+      const numericId = numericReplyId(nextId)
+      if (numericId === undefined) {
+        this.ctx.log('debug', TRACE_REASONS.quoteInvalidId)
+        currentTrace()?.emit('quote', { ok: false, reason: TRACE_REASONS.quoteInvalidId })
+        break
+      }
+      if (visited.has(numericId)) {
+        parts.push('[引用循环已停止]')
+        break
+      }
+      visited.add(numericId)
+      try {
+        // Only the outer quote has already been verified by the mention gate.
+        const data = depth === 0 && verifiedData !== undefined ? verifiedData
+          : await this.ctx.call('get_msg', { message_id: numericId }) as QuotedMessageData
+        const segments = Array.isArray(data.message) ? data.message as OneBotSegment[] : undefined
+        const raw = typeof data.raw_message === 'string' ? data.raw_message
+          : typeof data.message === 'string' ? data.message : ''
+        const parsed = parseMessage(segments, raw)
+        let text = cqUnescape(parsed.text)
+        if (text.trim() === '') break
+        const images = parsed.media.filter(ref => ref.kind === 'image')
+        if (chatId !== undefined && images.length > 0) {
+          // Quotes are context, not a new direct /ocr target. Reuse the guarded
+          // downloader without replacing either a resolved direct image or a
+          // lazy ref registered before command routing. Never start background
+          // transcription for quoted audio or fetch quoted merged forwards.
+          text = await this.buildBody(text, images, chatId, false)
+        }
+        const name = sanitizeNickname(data.sender?.nickname ?? '')
+        parts.push((depth === 0 ? '[引用]' : '[引用·第' + (depth + 1) + '层]') + (name !== '' ? name + ': ' : '') + text)
+        nextId = parsed.replyId
+        if (nextId !== undefined && depth + 1 === limit) parts.push('[引用已达层数上限]')
+      } catch (error) {
+        this.ctx.log('debug', 'quote expansion failed: ' + describeError(error))
+        currentTrace()?.emit('quote', { ok: false, reason: '引用消息展开失败，已跳过剩余引用: ' + describeError(error) })
+        break
+      }
     }
-    try {
-      // Local to one message: no cross-chat cache or shared mutable quote state.
-      const data = verifiedData ?? await this.ctx.call('get_msg', { message_id: numericId }) as QuotedMessageData
-      const segments = Array.isArray(data.message) ? data.message as OneBotSegment[] : undefined
-      const raw = typeof data.raw_message === 'string' ? data.raw_message : ''
-      const text = cqUnescape(segmentText(segments, raw))
-      if (text.trim() === '') return ''
-      const name = data.sender?.nickname ?? ''
-      return '[引用]' + (name !== '' ? name + ': ' : '') + text
-    } catch (error) {
-      this.ctx.log('debug', 'quote expansion failed: ' + describeError(error))
-      currentTrace()?.emit('quote', { ok: false, reason: '引用消息展开失败，已降级为空引用: ' + describeError(error) })
-      return ''
-    }
+    return parts.join('\n')
   }
 
   /**

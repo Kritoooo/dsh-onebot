@@ -236,6 +236,10 @@ Env vars: `ONEBOT_ALLOWED_USERS` (comma-separated admins), `ONEBOT_ALLOW_ALL_USE
 
 ### Reply-trigger lookup cost and diagnostics
 
+This fork's `0.9.19-kirito.1` resolves images and stickers in quoted messages through the existing guarded media pipeline, including CQ-string responses. Quotes retain their local image paths for an image-capable model and an enabled image-reading tool such as dsh's native `read_image`. Quoted images do not replace the direct-image target used by `/ocr`; the duplicated base64 prefix in that command is also fixed.
+
+Set `maxQuoteDepth` in the plugin's `config` in `cordis.patch.yml`: an integer from `0` to `5`, default `1`. Zero disables expansion; one expands only the direct quote; two follows one further quoted reply. Each ID is visited at most once per chain. Depth limits, cycles, and lookup failures stop further expansion while keeping completed quotes and the current message. Quoted merged forwards are not recursively fetched, and quoted audio does not start transcription. This advanced option is not yet exposed in the dedicated plugin settings page. Disabling expansion does not disable reply-author verification at the mention gate.
+
 With `requireMention` enabled, each valid reply without an explicit @ triggers one `get_msg` lookup after the group-policy and dedup gates, provided the bot identity is known. This includes members replying to one another. Accepted replies reuse the response for quote expansion. The lookup precedes the inbound message rate limit, so `rateLimitPerMinute` does not cap these queries. There is no cross-message cache; caching can be considered if high-traffic groups reveal a bottleneck.
 
 Reply IDs must be exactly representable decimal integers (negative IDs are supported); invalid IDs skip the query. When tracing is enabled, the `mention` stage distinguishes invalid IDs, failed lookups or empty responses, missing authors, non-bot authors and ordinary unmentioned messages. For explicit @, private messages and disabled mention gating, an invalid quote skips only its expansion, not the message itself.

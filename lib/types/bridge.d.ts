@@ -62,6 +62,8 @@ export interface BridgeConfig {
     /** B7: per-chat per-minute sliding-window cap for normal (non-command)
      * messages; absent → 30, 0 disables. */
     rateLimitPerMinute?: number;
+    /** Quoted-message expansion depth: default 1, 0 disables, hard maximum 5. */
+    maxQuoteDepth?: number;
     restrictedMemberPrefix: boolean;
     sensitivePatterns: readonly string[];
     mediaDir: string;

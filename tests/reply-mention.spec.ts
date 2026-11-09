@@ -51,7 +51,7 @@ function makeHarness(options: HarnessOptions = {}) {
   const emit = vi.fn<TraceScope['emit']>()
   const trace: TraceScope = { traceId: 't-reply', chatId: 'group:888', messageId: '456', emit }
   let pipeline: InboundPipeline
-  const expandQuote = vi.fn((id: string, verified?: QuotedMessageData) => pipeline.expandQuote(id, verified))
+  const expandQuote = vi.fn((id: string, verified?: QuotedMessageData, chatId?: Parameters<InboundPipeline['expandQuote']>[2]) => pipeline.expandQuote(id, verified, chatId))
   pipeline = new InboundPipeline({
     call,
     selfId: () => options.selfId ?? BOT,
@@ -126,7 +126,7 @@ describe('reply-only group mention verification', () => {
       const h = makeHarness({ author: BOT, ...item.options })
       await h.pipeline.processInbound(inbound(item.message))
       expect(h.call).toHaveBeenCalledTimes(1)
-      expect(h.expandQuote).toHaveBeenCalledExactlyOnceWith('123', h.response)
+      expect(h.expandQuote).toHaveBeenCalledExactlyOnceWith('123', h.response, 'group:888')
       expect(h.dispatchFollowup).toHaveBeenCalledTimes(1)
       const text = h.dispatchFollowup.mock.calls[0][1]
       expect(text).toContain('[@我]')
@@ -274,7 +274,7 @@ describe('reply id validation', () => {
           ? [{ type: 'reply', data: { id } }, body] : `[CQ:reply,id=${id}] body`
         await runWithTrace(h.trace, () => h.pipeline.processInbound(inbound(message)))
         expect(h.call).toHaveBeenCalledTimes(1)
-        expect(h.expandQuote).toHaveBeenCalledExactlyOnceWith(id, h.response)
+        expect(h.expandQuote).toHaveBeenCalledExactlyOnceWith(id, h.response, 'group:888')
         expect(h.dispatchFollowup).toHaveBeenCalledTimes(1)
         expect(h.emit).not.toHaveBeenCalled()
       })

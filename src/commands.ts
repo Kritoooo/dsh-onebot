@@ -898,7 +898,7 @@ async function handleOcrCommand(ctx: CommandContext, chatId: ChatId): Promise<vo
   }
   let lines: string
   try {
-    const data = await ctx.connection.call('ocr_image', { image: 'base64://' + b64 }) as { texts?: Array<{ text?: string }> }
+    const data = await ctx.connection.call('ocr_image', { image: b64 }) as { texts?: Array<{ text?: string }> }
     const texts = Array.isArray(data.texts) ? data.texts.map(t => t.text ?? '').filter(t => t !== '') : []
     lines = texts.join('\n')
   } catch (error) {

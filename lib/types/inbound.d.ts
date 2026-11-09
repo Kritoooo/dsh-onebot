@@ -117,7 +117,7 @@ export interface InboundContext {
     buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>;
     /** Quote expansion via the overridable bridge facade; a verified response
      * is reused for reply-only triggers instead of querying the same id twice. */
-    expandQuote(messageId: string, verifiedData?: QuotedMessageData): Promise<string>;
+    expandQuote(messageId: string, verifiedData?: QuotedMessageData, chatId?: ChatId): Promise<string>;
     /** Turn dispatch — bridge-owned orchestration (ensureChat + per-turn prefixes). */
     dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>;
     /** T2 (P1): busy-turn policy seam — invoked for every non-command message
@@ -145,7 +145,7 @@ export interface InboundContext {
     /** The only config fields the inbound pipeline reads. The W2-② dedup
      * window rides as an optional intersection member so the bridge's
      * BridgeConfig type stays untouched (absent → the default window). */
-    config: Pick<BridgeConfig, 'botQQ' | 'ignoreSelf' | 'requireMention' | 'rateLimitPerMinute' | 'restrictedMemberPrefix' | 'maxInboundFileBytes' | 'notices'> & Partial<{
+    config: Pick<BridgeConfig, 'botQQ' | 'ignoreSelf' | 'requireMention' | 'rateLimitPerMinute' | 'maxQuoteDepth' | 'restrictedMemberPrefix' | 'maxInboundFileBytes' | 'notices'> & Partial<{
         /** W2-② (chatId, message_id) dedup window in seconds; 0 disables. */
         dedupWindowSeconds: number;
     }>;
@@ -201,9 +201,9 @@ export declare class InboundPipeline {
      * Build the message body text: placeholders become annotated local paths
      * (images/voices/videos) and voice files are transcribed when enabled.
      */
-    buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>;
+    buildBody(text: string, media: MediaRef[], chatId: ChatId, rememberImage?: boolean): Promise<string>;
     /** Resolve one media ref to a text annotation with a local path. */
-    resolveMediaRef(ref: MediaRef, chatId: ChatId): Promise<string>;
+    resolveMediaRef(ref: MediaRef, chatId: ChatId, rememberImage?: boolean): Promise<string>;
     /** M3-D4c: transcribe in the background and deliver the labeled transcript
      * into the chat's turn (steer at the running turn's nearest step boundary,
      * or a new turn when the agent is idle). Failure keeps [语音] as final. */
@@ -212,9 +212,10 @@ export declare class InboundPipeline {
      * Expand a quote through get_msg, or reuse its already verified response.
      * @param messageId - quoted OneBot message id.
      * @param verifiedData - optional response fetched by this inbound message's gate.
+     * @param chatId - owning chat; enables guarded image resolution. Legacy callers remain text-only.
      * @returns the existing [引用] text, or an empty string when expansion fails.
      */
-    expandQuote(messageId: string, verifiedData?: QuotedMessageData): Promise<string>;
+    expandQuote(messageId: string, verifiedData?: QuotedMessageData, chatId?: ChatId): Promise<string>;
     /**
      * Fetch an inbound QQ file to a local path. NapCat's get_file may return
      * container-internal paths unreachable from this host, so:

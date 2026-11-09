@@ -94,6 +94,8 @@ export interface BridgeConfig {
   /** B7: per-chat per-minute sliding-window cap for normal (non-command)
    * messages; absent → 30, 0 disables. */
   rateLimitPerMinute?: number
+  /** Quoted-message expansion depth: default 1, 0 disables, hard maximum 5. */
+  maxQuoteDepth?: number
   restrictedMemberPrefix: boolean
   sensitivePatterns: readonly string[]
   mediaDir: string
@@ -429,7 +431,7 @@ export class ChatBridge {
         return true
       },
       buildBody: (text, media, chatId) => this.buildBody(text, media, chatId),
-      expandQuote: (messageId, verifiedData) => this.expandQuote(messageId, verifiedData),
+      expandQuote: (messageId, verifiedData, chatId) => this.expandQuote(messageId, verifiedData, chatId),
       dispatchFollowup: (chatId, text, role, nickname) => this.dispatchFollowup(chatId, text, role, nickname),
       interceptBusyTurn: (chatId, text, role, nickname, plain) => this.interceptBusyTurn(chatId, text, role, nickname, plain),
       interceptQuestionAnswer: (chatId, text) => this.interceptQuestionAnswer(chatId, text),
@@ -1192,8 +1194,8 @@ export class ChatBridge {
   }
 
   /** Expand a quote, forwarding a verified response without repeating get_msg. */
-  private expandQuote(messageId: string, verifiedData?: QuotedMessageData): Promise<string> {
-    return this.inbound.expandQuote(messageId, verifiedData)
+  private expandQuote(messageId: string, verifiedData?: QuotedMessageData, chatId?: ChatId): Promise<string> {
+    return this.inbound.expandQuote(messageId, verifiedData, chatId)
   }
 
   // ------------------------------------------------------------ outbound

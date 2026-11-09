@@ -117,7 +117,7 @@ export function makeFakeAgents(
 }
 
 /** Full bridge + WS harness: inbound via real WebSocket, outbound captured. */
-export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void; notices?: NoticeTexts; monoFamilies?: readonly string[]; allowPrivateHosts?: boolean; respond?: Record<string, (params: Record<string, unknown>) => unknown>; userQuestions?: unknown }) {
+export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void; notices?: NoticeTexts; monoFamilies?: readonly string[]; allowPrivateHosts?: boolean; respond?: Record<string, (params: Record<string, unknown>) => unknown>; userQuestions?: unknown }) {
   const ctx = new Context()
   const sessionIds: string[] = []
   const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[], agentListeners: [] as Array<{ event: string; listener: (request: unknown, next: () => Promise<unknown>) => unknown }> }
@@ -146,6 +146,7 @@ export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: st
       maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
       textImageThreshold: opts?.textImageThreshold ?? 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],
       agentPreset: 'standard', workspacePath: mediaDir,
+      maxQuoteDepth: opts?.maxQuoteDepth,
       // T2 (P1): busy-turn policy override (absent = the 'queue' default).
       ...(opts?.newMessagePolicy !== undefined ? { newMessagePolicy: opts.newMessagePolicy } : {}),
       // T3 (P2): deferred-delivery timeout override (absent = the 10min default).

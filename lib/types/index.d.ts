@@ -156,6 +156,8 @@ export interface Config {
     };
     /** Per-chat per-minute sliding-window cap for normal (non-command) messages; 0 disables. */
     rateLimitPerMinute: number;
+    /** Maximum quoted-message chain depth (0 disables, default 1, maximum 5). */
+    maxQuoteDepth: number;
     restrictedMemberPrefix: boolean;
     sensitivePatterns: string[];
     mediaDir: string;
