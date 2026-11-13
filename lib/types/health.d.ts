@@ -34,20 +34,6 @@ export interface HealthDeps {
         dayUsed: number;
         dayLimit: number;
     };
-    /** Recorder state (absent = recording off). */
-    recorder?: {
-        enabled: boolean;
-        redact: boolean;
-        written: number;
-    } | undefined;
-    /** Inject channel state (absent = channel off). */
-    inject?: {
-        enabled: boolean;
-        dryRun: boolean;
-        consumed: number;
-        intercepted: number;
-        skippedHistory: number;
-    } | undefined;
     /** The already-redacted config snapshot (see redactSnapshot). */
     configSnapshot: Record<string, unknown>;
     /** Secret VALUES to scrub from every packed artifact (e.g. accessToken). */

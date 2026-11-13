@@ -8,19 +8,14 @@
  */
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { SessionId as makeSessionId } from '@deepseek-ai/dsh-session'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { OneBotConnection } from './connection.js'
-import type { MediaRef } from './cq.js'
-import { RESTRICTED_PREFIX, type ChatId, type UserRole, wrapUserMessage } from './chat.js'
-import type { PendingSelection, SessionSwitchOutcome, SwitchableSession } from './registry.js'
-import { fileToBase64 } from './media.js'
-import type { AgentDefaultModelLike, AgentPresetsLike, BridgeConfig, BridgeDeps, LlmCatalogPort, SessionPersistenceLike, SessionPreviewEvent, SessionReadHandleLike, WorkspaceRegistryLike } from './bridge.js'
+import { type ChatId, type UserRole, wrapUserMessage } from './chat.js'
+import type { AgentDefaultModelLike, BridgeConfig } from './bridge.js'
 import { describeError } from './errors.js'
 import { failureRefSuffix, isFailureRef } from './ref.js'
 import type { TraceStage } from './trace.js'
@@ -37,102 +32,32 @@ export interface CommandChatView {
   lastNickname: string
   loopPending: string | null
   loopBuffer: Array<{ id: string; text: string; sentAt: number }>
+  pendingTurnRoles: UserRole[]
 }
-
-/** The bridge capabilities the command surface may touch. Deliberately
- * narrower than BridgeDeps: handlers get the outbound send path, the
- * per-chat state they already owned pre-split, and the few services they
- * call — never the agent registry, media store, or the policy allowlists
- * (the admin gate is answered by `isAdmin`, not by exposing `policy`). */
 export interface CommandContext {
-  /** Full outbound pipeline send (the commands' only reply path). */
   sendToChat(chatId: ChatId, text: string): Promise<string[]>
-  /** Bridge log line callback. */
   log(level: 'info' | 'warn' | 'error' | 'debug', message: string): void
-  /** T1 (#27): /steer 确认文案取 notices.steerAccepted（非空 string=自定义）；
-   * 缺省/true/false → 默认文案（命令确认是命令回执，不受 false 关闭影响）。 */
   notices?: { steerAccepted?: NoticeSetting }
-  /** Router entry gate: the admin check against the policy allowlist. */
   isAdmin(userId: string): boolean
-  /** Live chat lookup / existence probe. */
   getChat(chatId: ChatId): CommandChatView | undefined
   hasChat(chatId: ChatId): boolean
-  /** Registry capabilities the commands legitimately trigger. */
   resetChat(chatId: ChatId): Promise<void>
   dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>
-  /** T3 (P2): /stop — 显式终止该聊天的超时补发跟踪（pending 条目转
-   * cancelled，其他聊天不受影响）。无补发条目时为 no-op。 */
   stopDeferredTracking(chatId: ChatId): void
-  /** T2 (P1): /steer — the bridge-owned steer core (agent.steer with the
-   * producer-owned source kind; the createUserMessage write point stays in
-   * bridge.ts). Returns false when the chat has no live agent. */
   steerRunningTurn(chatId: ChatId, text: string): boolean
-  /** Per-chat state readers/writers (the pre-split private maps). */
   effectiveCwd(chatId: ChatId): string
   sessionIdFromMapping(chatId: ChatId): Promise<string | undefined>
   resolvePresetId(chatId: ChatId): Promise<string | undefined>
-  setChatWorkspacePath(chatId: ChatId, path: string): void
-  presetOverride(chatId: ChatId): string | undefined
-  setPresetOverride(chatId: ChatId, id: string): void
-  hasPresetOverride(chatId: ChatId): boolean
   interimOverride(chatId: ChatId): boolean | undefined
   setInterimOverride(chatId: ChatId, value: boolean): void
-  goal(chatId: ChatId): string | undefined
-  setGoal(chatId: ChatId, value: string): void
-  deleteGoal(chatId: ChatId): void
-  lastImagePath(chatId: ChatId): string | undefined
-  lastImagePath(chatId: ChatId): string | undefined
-  /** R2: per-chat pending serial-number selection snapshot (the numbered list
-   * a bare /workspace|/model|/preset|/session rendered; lazy 5-min TTL, see below). */
-  /** /session: this chat's switchable retired sessions (newest first). */
-  switchableSessions(chatId: ChatId): SwitchableSession[]
-  /** T4 (#15): broken (hard-retired) session count from the registry's
-   * retire record, surfaced by the /session list. Absent = the list omits
-   * the broken-count line (pre-T4 hosts/tests). */
-  brokenSessionCount?: (() => number) | undefined
-  /** /session <序号>: switch the chat back to a listed session. */
-  switchSession(chatId: ChatId, targetSessionId: string): Promise<SessionSwitchOutcome>
-  /** /session list previews: the persistence port each retired session's
-   * first user input is cold-read through (read handle + small event prefix).
-   * Absent = preview-less items. */
-  sessionPersistence: SessionPersistenceLike | undefined
-  pendingSelection(chatId: ChatId): PendingSelection | undefined
-  setPendingSelection(chatId: ChatId, value: PendingSelection | undefined): void
-  /** Lazy media resolution for the /ocr pending image ref (C6a). */
-  resolveMediaRef(ref: MediaRef, chatId: ChatId): Promise<string>
-  /** Consume the pending pre-routing image ref (get + delete, /ocr only). */
-  takePendingImageRef(chatId: ChatId): MediaRef | undefined
-  /** Services (narrow slices of the bridge deps). */
-  /** Live model catalog for /model (M2-C5b port; index.ts wires it over the
-   * live llm service — commands never touch Context). */
-  llmCatalog: LlmCatalogPort | undefined
-  workspaceRegistry: WorkspaceRegistryLike | undefined
   agentDefaultModel: AgentDefaultModelLike | undefined
-  agentPresets: AgentPresetsLike | undefined
-  commands: BridgeDeps['commands']
   connection: OneBotConnection
-  dshHome: string | undefined
-  /** W1/T5 /healthcheck: render the health summary (absent = the bridge has
-   * no health wiring — the command replies with a hint instead). */
   healthReport?: (() => Promise<string>) | undefined
-  /** W1/T5 /healthcheck export: pack the redacted diagnostics archive,
-   * returning its path. T4 (P3): the optional trigger reference is stamped
-   * into the archive file name (absent = the bridge's latest fault reference,
-   * or a reference-free name when none was recorded). */
   exportDiagnostics?: ((triggerRef?: string) => Promise<string>) | undefined
-  /** T4 (P3): command-plane failure reference entry (/retry dispatch throw).
-   * Mints an MF- reference through the bridge (registry + trace + structured
-   * log) and returns it for the ⚠️ notice tail. */
   reportFailure?: ((chatId: ChatId, stage: TraceStage, detail: string) => string) | undefined
-  /** T3-board /silent: per-chat silence window — epoch-ms until which the
-   * inbound pipeline ignores NORMAL messages (undefined = not silenced, or
-   * the window already expired). T3-board persistence: the durable copy is
-   * ChatSettings.silentUntil (chat-sessions.json) — the window survives a
-   * plugin restart and /new; a bare /silent clears it explicitly. */
   silentUntil?: ((chatId: ChatId) => number | undefined) | undefined
   setSilentUntil?: ((chatId: ChatId, untilMs: number | undefined) => void) | undefined
-  /** The only config fields the commands read. */
-  config: Pick<BridgeConfig, 'interimMessages' | 'maxImageBytes' | 'unknownCommand'>
+  config: Pick<BridgeConfig, 'interimMessages' | 'unknownCommand'>
 }
 
 /** T9-A: the sender identity the inbound pipeline already resolved for the
@@ -173,28 +98,21 @@ export interface CommandDefinition {
 
 /** The routed command table. Row order = the /help line order inside each
  * group (the router matches by name, so ordering is routing-neutral). */
-export const COMMANDS: CommandDefinition[] = [
+export const
+COMMANDS: CommandDefinition[] = [
   { name: 'new', adminOnly: true, group: '会话', help: '开启新会话（清空上下文）', handler: async (ctx, chatId) => {
     ctx.log('info', 'slash /new for ' + chatId)
     await ctx.resetChat(chatId)
   } },
   { name: 'stop', adminOnly: true, group: '操作', help: '停止当前生成', handler: (ctx, chatId) => handleStopCommand(ctx, chatId) },
   { name: 'steer', adminOnly: true, group: '操作', help: '<补充内容> 向运行中的任务补充指令', handler: (ctx, chatId, arg, sender) => handleSteerCommand(ctx, chatId, arg, sender) },
-  { name: 'model', adminOnly: true, group: '其他', help: '[--default] <provider> <model> 切换模型（--default 改部署默认；无参两级序号列表）', handler: (ctx, chatId, arg) => handleModelCommand(ctx, chatId, arg) },
-  { name: 'workspace', adminOnly: true, group: '会话', help: '[路径|序号|list] 查看或切换工作区', handler: (ctx, chatId, arg) => handleWorkspaceCommand(ctx, chatId, arg) },
-  { name: 'preset', adminOnly: true, group: '会话', help: '[id|序号] 查看/切换 agent 预设', handler: (ctx, chatId, arg) => handlePresetCommand(ctx, chatId, arg) },
-  { name: 'session', adminOnly: true, group: '会话', help: '[序号] 查看/切回历史会话', handler: (ctx, chatId, arg) => handleSessionCommand(ctx, chatId, arg) },
   { name: 'status', adminOnly: true, group: '查询', help: '会话全景', handler: (ctx, chatId) => handleStatusCommand(ctx, chatId) },
   { name: 'doctor', aliases: ['healthcheck'], adminOnly: true, group: '查询', help: '[export [参考号]|test] 运行体检（export [参考号] 导出脱敏诊断包；test 一键自测收发链路）', handler: (ctx, chatId, arg) => handleHealthcheckCommand(ctx, chatId, arg) },
   { name: 'retry', adminOnly: true, group: '操作', help: '重跑上一条', handler: (ctx, chatId) => handleRetryCommand(ctx, chatId) },
   { name: 'id', adminOnly: true, group: '查询', help: '会话标识（session/chat）', handler: (ctx, chatId) => handleIdCommand(ctx, chatId) },
   { name: 'ver', adminOnly: true, group: '查询', help: '插件版本', handler: (ctx, chatId) => handleVerCommand(ctx, chatId) },
-  { name: 'ocr', adminOnly: true, group: '操作', help: '识别最近一张图片', handler: (ctx, chatId) => handleOcrCommand(ctx, chatId) },
   { name: 'silent', adminOnly: true, group: '操作', help: '[分钟] 临时免打扰（默认 30 分钟，期间普通消息被忽略；再次 /silent 提前解除）', handler: (ctx, chatId, arg) => handleSilentCommand(ctx, chatId, arg) },
   { name: 'mode', adminOnly: true, group: '输出', help: '[interim|instant] 出站模式（合并卡片/逐条即时）', handler: (ctx, chatId, arg) => handleModeCommand(ctx, chatId, arg) },
-  { name: 'plan', adminOnly: true, group: '输出', help: '[off|内容] 宿主计划模式', handler: (ctx, chatId, arg) => handlePlanCommand(ctx, chatId, arg) },
-  { name: 'permission', adminOnly: true, group: '会话', help: '[w|f|预设名|序号] 切换权限预设（w=工作区可写+需审批，f=全盘+免审批）', handler: (ctx, chatId, arg) => handlePermissionCommand(ctx, chatId, arg) },
-  { name: 'goal', adminOnly: true, group: '其他', help: '[目标|clear] 目标记录', handler: (ctx, chatId, arg) => handleGoalCommand(ctx, chatId, arg) },
   { name: 'help', adminOnly: true, memberVisible: true, group: '其他', help: '本帮助', handler: async (ctx, chatId, _arg, sender) => {
     // T3-board: members get the member view (memberVisible rows only); the
     // admin card is unchanged.
@@ -332,6 +250,8 @@ export async function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text
 /** /stop: cancel the running generation and drop deferred loop state. */
 async function handleStopCommand(ctx: CommandContext, chatId: ChatId): Promise<void> {
   const chat = ctx.getChat(chatId)
+  // Clear before awaiting the acknowledgement, even if sending it fails.
+  if (chat !== undefined) chat.pendingTurnRoles.length = 0
   if (chat !== undefined && chat.agent.status === 'running') {
     chat.agent.cancel({ kind: 'user' })
     // Drop the deferred loop state so the cancelled turn settles silently
@@ -366,7 +286,7 @@ async function handleSilentCommand(ctx: CommandContext, chatId: ChatId, arg: str
     await ctx.sendToChat(chatId, '⚠️ 静音窗口未接线（宿主未提供该能力）。')
     return
   }
-  // Same bracket-stripping posture as /session: IM input likes to wrap
+
   // numbers in full-width or ASCII brackets.
   const trimmed = arg.trim().replace(/^[<＜([{（【]+\s*/, '').replace(/\s*[>＞)}）】\]]+$/, '').trim()
   if (trimmed === '') {
@@ -431,265 +351,6 @@ async function handleSteerCommand(ctx: CommandContext, chatId: ChatId, arg: stri
   if (notice !== null) await ctx.sendToChat(chatId, notice)
 }
 
-/** R2: TTL of a pending serial-number selection — judged lazily at the next
- * same-kind numeric reply (no timers): a snapshot older than 5 minutes is
- * expired and treated as stateless. */
-const PENDING_SELECTION_TTL_MS = 5 * 60 * 1000
-
-/** What a numeric pick hands back to its handler: the item's resolved payload
- * plus the snapshot provenance (only /model branches on phase/provider). */
-interface PendingPick {
-  payload: string
-  phase?: 'providers' | 'models'
-  provider?: string
-}
-
-/**
- * R2 serial-number resolution. When `arg` is a pure number AND the chat holds
- * a pending selection snapshot of the same kind, the argument is read as a
- * 1-based index into that snapshot:
- *  - in-range hit     → clears the snapshot and returns the item (the handler
- *    re-runs its original switch path with `payload`);
- *  - expired snapshot → replies 「序号选择已过期…」, clears it, returns null (stop);
- *  - out of range     → replies 「序号越界…」, KEEPS the snapshot (the user can
- *    retry a correct index without re-listing), returns null (stop).
- * Anything else — a non-numeric argument, or no same-kind snapshot at all —
- * returns undefined so the handler's original semantics run unchanged.
- * Snapshots of other kinds are never touched here (single shared slot,
- * refreshed only by a bare /workspace|/model|/preset).
- */
-async function resolveNumericSelection(
-  ctx: CommandContext,
-  chatId: ChatId,
-  kind: PendingSelection['kind'],
-  arg: string,
-  command: string,
-): Promise<PendingPick | null | undefined> {
-  if (!/^\d+$/.test(arg.trim())) return undefined
-  const pending = ctx.pendingSelection(chatId)
-  if (pending === undefined || pending.kind !== kind) return undefined
-  if (Date.now() - pending.createdAt > PENDING_SELECTION_TTL_MS) {
-    ctx.setPendingSelection(chatId, undefined)
-    await ctx.sendToChat(chatId, `❌ 序号选择已过期，请重新执行 ${command} 查看。`)
-    return null
-  }
-  const item = pending.items[Number(arg.trim()) - 1]
-  if (item === undefined) {
-    await ctx.sendToChat(chatId, `❌ 序号越界，请回复 ${command} 重新查看列表。`)
-    return null
-  }
-  ctx.setPendingSelection(chatId, undefined)
-  return { payload: item.payload, phase: pending.phase, provider: pending.provider }
-}
-
-/** /model: show the current model (+ discoverable providers), or switch.
- * A bare switch retargets ONLY this chat's agent selection (M2-C5a: it no
- * longer rewrites the deployment default — that is the explicit --default
- * form's job). */
-async function handleModelCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  const chat = ctx.getChat(chatId)
-  const current = safeChatModel(chat, ctx)
-    ?? safeDefaultModel(ctx)
-  if (arg === '') {
-    const cur = current !== undefined ? current.provider + '/' + current.model : '（未设置）'
-    let out = '当前模型：' + cur
-    const providerIds: string[] = []
-    try {
-      const providers = ctx.llmCatalog?.listProviders() ?? []
-      for (const p of providers.slice(0, 6)) {
-        providerIds.push(p.id)
-        try {
-          const models = (await ctx.llmCatalog?.listModels(p.id)) ?? []
-          out += '\n' + p.id + ': ' + models.slice(0, 10).map(m => m.id).join(', ')
-        } catch (error) {
-          out += '\n' + p.id + ': （列表不可用）'
-          ctx.log('warn', 'listModels failed for ' + p.id + ': ' + String(error))
-        }
-      }
-    } catch (error) {
-      out += '\n（模型列表不可用）'
-      ctx.log('warn', 'listProviders failed: ' + String(error))
-    }
-    if (providerIds.length > 0) {
-      // R2: level-1 snapshot — provider ids only, capped like the display above.
-      out += '\n可选来源：\n' + providerIds.map((id, i) => `${i + 1}. ${id}`).join('\n')
-      out += '\n回复 /model <序号> 查看该来源的模型。'
-      ctx.setPendingSelection(chatId, {
-        kind: 'model',
-        phase: 'providers',
-        items: providerIds.map(id => ({ label: id, payload: id })),
-        createdAt: Date.now(),
-      })
-    }
-    await ctx.sendToChat(chatId, out)
-    return
-  }
-  // R2: a pure-numeric argument is a serial-number pick against the snapshot
-  // the bare form rendered — without a live one, the original semantics below
-  // run unchanged (and /model --default keeps working: it is not numeric).
-  const picked = await resolveNumericSelection(ctx, chatId, 'model', arg, '/model')
-  if (picked === null) return
-  if (picked !== undefined) {
-    if (picked.phase === 'providers') {
-      // Level-1 hit: render that provider's numbered model list.
-      await sendModelPickList(ctx, chatId, picked.payload)
-      return
-    }
-    if (picked.phase === 'models' && picked.provider !== undefined) {
-      // Level-2 hit: re-enter the ORIGINAL switch path below with
-      // '<provider> <model>' (precheck, reply texts and scoping untouched).
-      arg = picked.provider + ' ' + picked.payload
-    }
-  }
-  const first = arg.split(/\s+/, 1)[0] ?? ''
-  const toDefault = first === '--default'
-  const rest = toDefault ? arg.slice(first.length).trim() : arg
-  const m = /^(\S+)[\s/]+(\S+)$/.exec(rest)
-  if (m === null) {
-    await ctx.sendToChat(chatId, '❌ 参数不完整或无法识别。\n用法：/model <provider> <model> 切换当前会话；/model --default <provider> <model> 修改部署默认')
-    return
-  }
-  const provider = m[1]
-  const model = m[2]
-  try {
-    const models = (await ctx.llmCatalog?.listModels(provider)) ?? []
-    if (models.length > 0 && !models.some(x => x.id === model)) {
-      await ctx.sendToChat(chatId, `❌ ${provider} 下没有模型 ${model}。可用：` + models.slice(0, 10).map(x => x.id).join(', ') + '\n用法：/model <provider> <model> 切换；/model 查看序号列表')
-      return
-    }
-  } catch (error) {
-    ctx.log('debug', 'model switch precheck failed for ' + provider + ': ' + String(error))
-  }
-  const next = { provider, model }
-  if (toDefault) {
-    // Explicit --default: rewrite the deployment-wide default only (M2-C5a).
-    if (ctx.agentDefaultModel !== undefined) {
-      try {
-        await ctx.agentDefaultModel.saveSelection(next)
-      } catch (error) {
-        ctx.log('warn', 'saveSelection failed: ' + String(error))
-      }
-    }
-    await ctx.sendToChat(chatId, `✅ 已修改部署默认模型：${provider}/${model}（下一步生效）`)
-    return
-  }
-  // Bare switch: record the selection on this chat's agent only — never the
-  // global default (M2-C5a; the old silent saveSelection here was a scope
-  // leak). dsh 0.2.2: `agent.model.select()` appends a durable model/selection
-  // event (the host facade used by dsh-api-session-controller); the guard
-  // keeps the old semantics where a deployment without a default model had
-  // no selection ref and the switch stayed a silent no-op.
-  if (chat !== undefined && safeChatModel(chat, ctx) !== undefined) {
-    chat.agent.model.select(next)
-  }
-  await ctx.sendToChat(chatId, `✅ 已切换当前会话模型：${provider}/${model}（下一步生效）`)
-}
-
-/** R2 level-2 model list for one provider: renders the numbered models and
- * snapshots them (phase 'models') so the next `/model <序号>` hits the
- * original per-chat switch path with '<provider> <model>'. */
-async function sendModelPickList(ctx: CommandContext, chatId: ChatId, provider: string): Promise<void> {
-  let models
-  try {
-    models = (await ctx.llmCatalog?.listModels(provider)) ?? []
-  } catch (error) {
-    ctx.log('warn', 'listModels failed for ' + provider + ': ' + String(error))
-    await ctx.sendToChat(chatId, `❌ 无法列出 ${provider} 的模型，请重新执行 /model 查看。`)
-    return
-  }
-  const shown = models.slice(0, 10)
-  if (shown.length === 0) {
-    await ctx.sendToChat(chatId, `（${provider} 下没有可用模型，请重新执行 /model 查看。）`)
-    return
-  }
-  ctx.setPendingSelection(chatId, {
-    kind: 'model',
-    phase: 'models',
-    provider,
-    items: shown.map(m => ({ label: m.id, payload: m.id })),
-    createdAt: Date.now(),
-  })
-  await ctx.sendToChat(chatId, `模型列表（${provider}）：\n` + shown.map((m, i) => `${i + 1}. ${m.id}`).join('\n') + '\n回复 /model <序号> 切换当前会话模型。')
-}
-
-/** /workspace: show current cwd, list workspaces, or switch directory. */
-async function handleWorkspaceCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  if (arg === '') {
-    const cwd = ctx.effectiveCwd(chatId)
-    let suffix = ''
-    try {
-      const ws = await ctx.workspaceRegistry?.resolveByPath(cwd)
-      suffix = ws !== undefined ? `（工作区 ${ws.id}，${ws.sessionIds.length} 个会话）` : '（无 workspace 记录）'
-    } catch (error) {
-      ctx.log('debug', 'resolveByPath failed: ' + String(error))
-    }
-    let out = `当前工作目录：${cwd} ${suffix}\n用法：/workspace <目录路径> 切换；/workspace list 列出全部`
-    // R2: snapshot the numbered list — a following `/workspace <序号>` switches
-    // without re-typing the path (payload = the exact path; lazy 5-min TTL).
-    try {
-      const list = ctx.workspaceRegistry?.list() ?? []
-      if (list.length > 0) {
-        let cwdReal = cwd
-        try {
-          cwdReal = await realpath(cwd)
-        } catch {
-          // marker comparison falls back to the raw cwd
-        }
-        out += '\n工作区列表：\n' + list.map((w, i) => `${i + 1}. ${w.path}（${w.sessionIds.length} 会话）${w.path === cwd || w.path === cwdReal ? ' ← 当前' : ''}`).join('\n')
-        out += '\n回复 /workspace <序号> 切换。'
-        ctx.setPendingSelection(chatId, {
-          kind: 'workspace',
-          items: list.map(w => ({ label: w.path, payload: w.path })),
-          createdAt: Date.now(),
-        })
-      }
-    } catch (error) {
-      ctx.log('debug', 'workspace list failed: ' + String(error))
-    }
-    await ctx.sendToChat(chatId, out)
-    return
-  }
-  if (arg === 'list') {
-    try {
-      const list = ctx.workspaceRegistry?.list() ?? []
-      if (list.length === 0) {
-        await ctx.sendToChat(chatId, '（没有任何 workspace 记录）')
-        return
-      }
-      await ctx.sendToChat(chatId, list.map(w => `${w.id}  ${w.path}（${w.sessionIds.length} 会话）`).join('\n'))
-    } catch (error) {
-      ctx.log('debug', 'workspace list failed: ' + String(error))
-      await ctx.sendToChat(chatId, '❌ 无法列出工作区。\n发 /workspace 查看当前工作目录。')
-    }
-    return
-  }
-  // R2: a pure-numeric argument is a serial-number pick against the snapshot
-  // above — without a live one it keeps the original path semantics below.
-  const picked = await resolveNumericSelection(ctx, chatId, 'workspace', arg, '/workspace')
-  if (picked === null) return
-  if (picked !== undefined) arg = picked.payload
-  try {
-    const path = await realpath(arg)
-    const s = await stat(path)
-    if (!s.isDirectory()) {
-      await ctx.sendToChat(chatId, `❌ 不是目录：${arg}\n发 /workspace 查看编号列表，或发 /workspace list 查看全部。`)
-      return
-    }
-    const hadChat = ctx.hasChat(chatId)
-    ctx.setChatWorkspacePath(chatId, path)
-    if (hadChat) {
-      // Retire the current agent: its session cwd is frozen at creation, so
-      // the next message re-creates the session under the new directory.
-      await ctx.resetChat(chatId)
-    }
-    await ctx.sendToChat(chatId, `✅ 工作区已切换：${path}\n下一条消息将使用新工作区（新会话）。`)
-    ctx.log('info', 'workspace switch for ' + chatId + ' -> ' + path)
-  } catch (error) {
-    ctx.log('debug', 'workspace switch failed: ' + String(error))
-    await ctx.sendToChat(chatId, `❌ 目录无效或不可访问：${arg}\n发 /workspace 查看编号列表，或发 /workspace list 查看全部。`)
-  }
-}
-
 /** /id: show the chat/session identity (admin debug aid). */
 async function handleIdCommand(ctx: CommandContext, chatId: ChatId): Promise<void> {
   const sessionId = ctx.getChat(chatId)?.sessionId ?? await ctx.sessionIdFromMapping(chatId)
@@ -704,46 +365,21 @@ async function handleVerCommand(ctx: CommandContext, chatId: ChatId): Promise<vo
   const commit = gitCommit()
   await ctx.sendToChat(chatId, 'dsh-onebot v' + (packageVersion() ?? '?') + (commit !== undefined ? ' (' + commit + ')' : ''))
 }
-
-/** /status: one-shot snapshot of the chat session state. */
 async function handleStatusCommand(ctx: CommandContext, chatId: ChatId): Promise<void> {
   const chat = ctx.getChat(chatId)
   const sessionId = chat?.sessionId ?? await ctx.sessionIdFromMapping(chatId)
-  const override = ctx.presetOverride(chatId)
-  let preset: string
-  if (override !== undefined) {
-    preset = override + '（/preset 覆盖）'
-  } else {
-    const resolved = await ctx.resolvePresetId(chatId)
-    preset = (resolved ?? undefined) !== undefined ? (resolved ?? '') + '（默认/配置）' : '（未记录）'
-  }
+  const preset = await ctx.resolvePresetId(chatId)
   const current = safeChatModel(chat, ctx) ?? safeDefaultModel(ctx)
   const model = current !== undefined ? current.provider + '/' + current.model : '（未设置）'
-  const cwd = ctx.effectiveCwd(chatId)
-  let wsSuffix = ''
-  try {
-    const ws = await ctx.workspaceRegistry?.resolveByPath(cwd)
-    wsSuffix = ws !== undefined ? `（工作区 ${ws.id}，${ws.sessionIds.length} 个会话）` : '（无 workspace 记录）'
-  } catch (error) {
-    ctx.log('debug', 'resolveByPath failed: ' + String(error))
-  }
   const interim = ctx.interimOverride(chatId)
-  const modeLabel = interim !== undefined
-    ? (interim ? 'interim（合并卡片）' : 'instant（逐条即时）') + '（/mode 覆盖）'
-    : (ctx.config.interimMessages ? 'interim（合并卡片）' : 'instant（逐条即时）') + '（全局配置）'
-  const agentState = chat !== undefined
-    ? 'busy=' + chat.busy + ' loopBuffer=' + chat.loopBuffer.length
-    : '（未建立会话）'
-  const switchableCount = ctx.switchableSessions(chatId).length
   await ctx.sendToChat(chatId,
     'chat    : ' + chatId + '\n' +
     'session : ' + (sessionId ?? '（未建立会话）') + '\n' +
-    'preset  : ' + preset + '\n' +
+    'preset  : ' + (preset ?? '（未记录）') + '\n' +
     'model   : ' + model + '\n' +
-    'cwd     : ' + cwd + ' ' + wsSuffix + '\n' +
-    '出站     : ' + modeLabel + '\n' +
-    'agent   : ' + agentState + '\n' +
-    '可切回   : ' + switchableCount + ' 条历史会话（/session 查看列表）')
+    'cwd     : ' + ctx.effectiveCwd(chatId) + '\n' +
+    '出站     : ' + ((interim ?? ctx.config.interimMessages) ? 'interim' : 'instant') + '\n' +
+    'agent   : ' + (chat !== undefined ? 'busy=' + chat.busy + ' loopBuffer=' + chat.loopBuffer.length : '（未建立会话）'))
 }
 
 /** W1/T5 /healthcheck: render the health summary, or pack the redacted
@@ -874,545 +510,12 @@ async function handleRetryCommand(ctx: CommandContext, chatId: ChatId): Promise<
   }
 }
 
-/** /ocr: OCR the most recent inbound image via NapCat's ocr_image. */
-async function handleOcrCommand(ctx: CommandContext, chatId: ChatId): Promise<void> {
-  // C6a: the command routed before media parsing — resolve the registered
-  // pending image ref now (downloads on first use, records the last-image
-  // path exactly like the normal path).
-  const pending = ctx.takePendingImageRef(chatId)
-  if (pending !== undefined) {
-    await ctx.resolveMediaRef(pending, chatId)
-  }
-  const path = ctx.lastImagePath(chatId)
-  if (path === undefined || path === '') {
-    await ctx.sendToChat(chatId, '请先在对话里发一张图片，再 /ocr。')
-    return
-  }
-  let b64: string
-  try {
-    b64 = await fileToBase64(path, ctx.config.maxImageBytes)
-  } catch (error) {
-    ctx.log('warn', 'ocr image read failed: ' + String(error))
-    await ctx.sendToChat(chatId, `❌ 读取图片失败：${describeError(error)}\n请重新发送图片后再 /ocr。`)
-    return
-  }
-  let lines: string
-  try {
-    const data = await ctx.connection.call('ocr_image', { image: b64 }) as { texts?: Array<{ text?: string }> }
-    const texts = Array.isArray(data.texts) ? data.texts.map(t => t.text ?? '').filter(t => t !== '') : []
-    lines = texts.join('\n')
-  } catch (error) {
-    ctx.log('warn', 'ocr_image failed: ' + String(error))
-    await ctx.sendToChat(chatId, `❌ OCR 失败：${describeError(error)}\n请稍后重试，或重新发送图片后再 /ocr。`)
-    return
-  }
-  if (lines.trim() === '') {
-    await ctx.sendToChat(chatId, 'OCR 未识别到文本。')
-    return
-  }
-  await ctx.sendToChat(chatId, 'OCR 结果：\n' + lines)
-}
-
-/** /preset: show available agent presets and the current one, or switch. */
-async function handlePresetCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  const listed = await listPresets(ctx)
-  if (arg.trim() === '') {
-    const current = ctx.presetOverride(chatId)
-      ?? await ctx.resolvePresetId(chatId)
-      ?? ctx.agentPresets?.defaultId
-    let out = '当前预设：' + (current ?? '（未记录）') + (ctx.hasPresetOverride(chatId) ? '（/preset 覆盖）' : '')
-    if (listed.length > 0) {
-      out += '\n可用预设：\n' + listed.map((s, i) => `${i + 1}. ${s}`).join('\n')
-      // R2: snapshot — payload is the preset id (listPresets renders `id（name）`;
-      // ids are directory names, so the first fullwidth paren splits them off).
-      ctx.setPendingSelection(chatId, {
-        kind: 'preset',
-        items: listed.map(s => ({ label: s, payload: s.split('（')[0] })),
-        createdAt: Date.now(),
-      })
-    }
-    out += '\n用法：/preset <id> 切换（重建会话）；/preset 查看'
-    if (listed.length > 0) out += '\n回复 /preset <序号> 切换。'
-    await ctx.sendToChat(chatId, out)
-    return
-  }
-  // R2: a pure-numeric argument is a serial-number pick against the snapshot
-  // above — without a live one it keeps the original <id> semantics below.
-  const picked = await resolveNumericSelection(ctx, chatId, 'preset', arg, '/preset')
-  if (picked === null) return
-  if (picked !== undefined) arg = picked.payload
-  const id = arg.trim()
-  if (ctx.agentPresets === undefined) {
-    await ctx.sendToChat(chatId, '❌ 当前宿主未提供 agentPresets 服务。')
-    return
-  }
-  let resolvedId: string
-  try {
-    const preset = await ctx.agentPresets.resolve(id)
-    resolvedId = preset.id
-  } catch (error) {
-    ctx.log('debug', 'preset resolve failed: ' + String(error))
-    await ctx.sendToChat(chatId, '❌ 预设不存在：' + id + (listed.length > 0 ? '\n可用：' + listed.join(', ') : '\n（未枚举到可用预设列表）') + '\n用法：/preset <id|序号> 切换（重建会话）；发 /preset 查看当前与可用列表。')
-    return
-  }
-  ctx.setPresetOverride(chatId, resolvedId)
-  if (ctx.hasChat(chatId)) {
-    await ctx.resetChat(chatId)
-  }
-  ctx.log('info', 'preset switch for ' + chatId + ' -> ' + resolvedId)
-  await ctx.sendToChat(chatId, `✅ 预设已切换：${resolvedId}\n下一条消息将重建会话并按新预设运行。`)
-}
-// ------------------------------------------------------------ /session previews
-
-/** /session list-item preview bound, in code points (emoji-safe — see
- * truncatePreview). */
-export const SESSION_PREVIEW_MAX_CHARS = 40
-
-/** How many leading events of a stored log the preview cold-reads. The first
- * real user input of a session sits within the first handful of events
- * (turn/start, the claimed user/message, the surface system message), so a
- * bounded prefix read keeps a 20-item list cheap where a full inspect would
- * decode the entire log per item. A log whose prefix holds no user/message
- * at all degrades to 「（无对话内容）」 like an empty one. */
-const SESSION_PREVIEW_EVENT_PREFIX = 24
-
-/** Item text when the log carries no readable user input. */
-const PREVIEW_NO_CONTENT = '（无对话内容）'
-/** Item text when the stored log is missing, unreadable or corrupt — the
- * degradation must never break the list or the switch-back flow. */
-const PREVIEW_UNREADABLE = '（内容不可读）'
-
-/** Whether a logged user-message source names a real queued user prompt (the
- * message a turn claimed) rather than a synthetic agent.inject() context or a
- * goal continuation round. Direct prompts carry kind 'user'; QQ chats
- * attribute their own inbound messages to this plugin (platform-source
- * logging), so the plugin-owned kind 'plugin:dsh-onebot' — also what the v3→v4
- * converter maps this plugin's historical rows to — is the chat's real user
- * input too. */
-export function isRealUserMessageSource(source: { kind?: string } | undefined): boolean {
-  if (source === undefined || typeof source !== 'object') return false
-  if (source.kind === 'user') return true
-  return source.kind === 'plugin:dsh-onebot'
-}
-
-/** Code-point-safe truncation (never splits a surrogate pair — the §3.1
- * emoji lesson): at most `maxLength` code points, the last one '…' when cut. */
-export function truncatePreview(text: string, maxLength: number): string {
-  if (maxLength <= 0) return ''
-  const chars = Array.from(text)
-  if (chars.length <= maxLength) return text
-  return chars.slice(0, maxLength - 1).join('') + '…'
-}
-
-/** QQ inbound user messages reach the session wrapped in the
- * <user_message> boundary (chat.ts wrapUserMessage), and inbound.ts may
- * prepend trusted framework metadata OUTSIDE that boundary: the restricted
- * member tag and the group prefix line ([HH:MM 昵称(QQ)][@我] —
- * buildGroupMessagePrefix). Strip that metadata, then return the
- * human-typed body between the opening tag's `>` and the LAST
- * `</user_message>`. Anything that is not a complete wrapped message
- * (different head, missing closer, empty body) comes back unchanged so the
- * caller's existing preview path applies — an unwrap failure never empties
- * the preview. */
-function unwrapUserMessageText(text: string): string {
-  let rest = text
-  if (rest.startsWith(RESTRICTED_PREFIX)) rest = rest.slice(RESTRICTED_PREFIX.length)
-  const groupPrefix = /^\[\d{2}:\d{2} .*?\(\d+\)\](?:\[@我\])? /.exec(rest)
-  if (groupPrefix !== null) rest = rest.slice(groupPrefix[0].length)
-  if (!rest.startsWith('<user_message ')) return text
-  const openEnd = rest.indexOf('>')
-  const closeStart = rest.lastIndexOf('</user_message>')
-  if (openEnd < 0 || closeStart < openEnd) return text
-  const body = rest.slice(openEnd + 1, closeStart)
-  return body.trim() === '' ? text : body
-}
-
-/** One-line preview text of one logged user message: every text block
- * concatenated, whitespace runs (newlines included) collapsed so the result
- * always stays single-line. Non-text blocks are ignored. A wrapped QQ
- * inbound message contributes its unwrapped body (unwrapUserMessageText). */
-function userMessagePreviewText(data: unknown): string {
-  const content = (data as { content?: unknown } | null | undefined)?.content
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const block of content) {
-    if (block !== null && typeof block === 'object'
-      && (block as { type?: unknown }).type === 'text'
-      && typeof (block as { text?: unknown }).text === 'string') {
-      parts.push((block as { text: string }).text)
-    }
-  }
-  return unwrapUserMessageText(parts.join('')).replace(/\s+/g, ' ').trim()
-}
-
-/** The one-line preview of a session's event log (events in log order):
- * the first REAL user input (queued user prompt — kind 'user', or this
- * plugin's attributed QQ message) with non-empty text; when the log has
- * none, the first user/message of ANY source with text (synthetic
- * agent.inject context / goal continuation fallback); '' when the log
- * carries no user input at all. */
-export function sessionPreviewFromEvents(events: readonly SessionPreviewEvent[], maxLength: number = SESSION_PREVIEW_MAX_CHARS): string {
-  let fallback = ''
-  for (const event of events) {
-    if (event === null || typeof event !== 'object' || event.type !== 'user/message') continue
-    const text = userMessagePreviewText(event.data)
-    if (text === '') continue
-    const source = (event.data as { source?: { kind?: string } } | null | undefined)?.source
-    if (isRealUserMessageSource(source)) return truncatePreview(text, maxLength)
-    if (fallback === '') fallback = text
-  }
-  return fallback === '' ? '' : truncatePreview(fallback, maxLength)
-}
-
-/** Shorten a session id for the one-line list while keeping BOTH ends: every
- * onebot id shares the `onebot-…` head, so head-only truncation (e.g. the
- * first 12 characters) would render every entry of a chat identically — the
- * unique tail must survive for the id to stay recognizable. */
-export function shortSessionId(id: string): string {
-  if (id.length <= 20) return id
-  return id.slice(0, 8) + '…' + id.slice(-8)
-}
-
-/** Cold-read one retired session's preview through the persistence port:
- * open a 'read' handle (never takes write ownership, works beside a live
- * writer), take the header's createdAt plus a small event prefix, then close
- * the handle — always, even when the read failed (AsyncDisposable: a leaked
- * handle pins backend resources). Returns undefined when the log is missing,
- * unreadable or corrupt; the caller renders 「（内容不可读）」 and neither
- * the rest of the list nor the switch-back flow is affected. */
-async function sessionPreviewFor(ctx: CommandContext, sessionId: string): Promise<{ createdAt: number | undefined; text: string } | undefined> {
-  const persistence = ctx.sessionPersistence
-  if (persistence === undefined) return { createdAt: undefined, text: '' }
-  let handle: SessionReadHandleLike | undefined
-  try {
-    handle = await persistence.open(makeSessionId(sessionId), 'read')
-    const prefix = await handle.read(0, SESSION_PREVIEW_EVENT_PREFIX)
-    const createdAt = typeof handle.header?.createdAt === 'number' && Number.isFinite(handle.header.createdAt) && handle.header.createdAt > 0
-      ? handle.header.createdAt
-      : undefined
-    return { createdAt, text: sessionPreviewFromEvents(prefix.events) }
-  } catch (error) {
-    ctx.log('warn', 'session preview read failed for ' + sessionId + ' (the list still renders): ' + describeError(error))
-    return undefined
-  } finally {
-    if (handle !== undefined) {
-      try {
-        await handle.close()
-      } catch (closeError) {
-        ctx.log('debug', 'session preview handle close failed for ' + sessionId + ': ' + describeError(closeError))
-      }
-    }
-  }
-}
-
-/** /session: list this chat's switchable retired sessions (the ones /new,
- * /workspace and /preset retired with intact history), or switch the chat back
- * to one by serial number. Each list item carries a one-line content preview
- * (the session's first real user input), the creation time and a truncated
- * id, so the admin can recognize a session without switching back. The
- * numbered list is snapshotted (R2, kind 'session') so a following
- * `/session <序号>` picks without re-listing. */
-async function handleSessionCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  // #4b: IM input routinely wraps the serial in brackets — /session <1>,
-  // ＜1＞ or ［1］. Strip angle/bracket wrappers before the numeric
-  // resolution so those spellings are equivalent to /session 1. Plain text
-  // (including unpaired brackets) passes through unchanged and still fails
-  // numeric resolution the old way.
-  arg = arg.trim().replace(/^[<＜([{（【]+\s*/, '').replace(/\s*[>＞)}）】\]]+$/, '').trim()
-  if (arg.trim() === '') {
-    const list = ctx.switchableSessions(chatId)
-    const current = ctx.getChat(chatId)?.sessionId ?? await ctx.sessionIdFromMapping(chatId)
-    // T4 (#15): broken sessions never enter the switchable list, so the count
-    // comes straight from the registry's retire record — surfaced so broken
-    // history is visible instead of silently vanished.
-    const brokenCount = ctx.brokenSessionCount?.() ?? 0
-    if (list.length === 0) {
-      let empty = '当前 session：' + (current ?? '（未建立会话）') + '\n（该会话没有可切回的历史会话）'
-      if (brokenCount > 0) empty += '\n⚠️ 另有 ' + brokenCount + ' 个损坏会话已隔离（不可切回）。'
-      empty += '\n用法：/session <序号> 切回；/new、/workspace、/preset 切换下来的旧会话会进入列表。'
-      await ctx.sendToChat(chatId, empty)
-      return
-    }
-    // Each item carries a one-line content preview + creation time so the
-    // admin can recognize the session without switching back. Previews are
-    // fetched per item and any failure degrades that item only — the rest of
-    // the list and the switch-back snapshot (full ids as payloads) are untouched.
-    const lines = await Promise.all(list.map(async (entry, index) => {
-      const preview = await sessionPreviewFor(ctx, entry.id)
-      const text = preview === undefined ? PREVIEW_UNREADABLE : (preview.text !== '' ? preview.text : PREVIEW_NO_CONTENT)
-      const created = preview?.createdAt !== undefined ? formatTimestamp(preview.createdAt) + ' 建立 · ' : ''
-      return `${index + 1}. ${text}（${created}${formatTimestamp(entry.retiredAt)} 退休 · ${shortSessionId(entry.id)}）`
-    }))
-    let out = '当前 session：' + (current ?? '（未建立会话）') + '\n可切回历史会话：\n' + lines.join('\n')
-    // T4 (#15): the broken count rides the list output (these ids are absent
-    // from the switchable list, so without the line they would look lost).
-    if (brokenCount > 0) out += '\n⚠️ 另有 ' + brokenCount + ' 个损坏会话已隔离（不可切回）。'
-    out += '\n回复 /session <序号> 切回（当前会话会进入列表，可来回切换）。'
-    ctx.setPendingSelection(chatId, {
-      kind: 'session',
-      items: list.map(e => ({ label: e.id, payload: e.id })),
-      createdAt: Date.now(),
-    })
-    await ctx.sendToChat(chatId, out)
-    return
-  }
-  // A busy chat must not be switched mid-generation (the outbound pipeline and
-  // the interim state belong to the live agent; the switch disposes it).
-  const chat = ctx.getChat(chatId)
-  if (/^\d+$/.test(arg.trim()) && chat !== undefined && chat.busy) {
-    await ctx.sendToChat(chatId, '当前正在生成回复，请先 /stop 再切换会话。')
-    return
-  }
-  const picked = await resolveNumericSelection(ctx, chatId, 'session', arg, '/session')
-  if (picked === null) return
-  if (picked === undefined) {
-    await ctx.sendToChat(chatId, '用法：/session 查看可切回会话；/session <序号> 切回。')
-    return
-  }
-  const outcome = await ctx.switchSession(chatId, picked.payload)
-  if (outcome.ok) {
-    await ctx.sendToChat(chatId, `✅ 已切回历史会话：${outcome.sessionId}\n（原会话已进入可切回列表，发 /session 查看；下一条消息继续该会话的历史上下文。）`)
-    return
-  }
-  if (outcome.reason === 'busy') {
-    await ctx.sendToChat(chatId, '当前正在生成回复，请先 /stop 再切换会话。')
-    return
-  }
-  if (outcome.reason === 'not-switchable') {
-    await ctx.sendToChat(chatId, '❌ 该序号对应的会话不在当前会话的可切回列表中。发 /session 重新查看。')
-    return
-  }
-  if (outcome.reason === 'broken') {
-    await ctx.sendToChat(chatId, '❌ 该历史会话已损坏，无法切回。\n发 /session 查看其他可切回会话。')
-    return
-  }
-  await ctx.sendToChat(chatId, '❌ 切回历史会话失败：' + outcome.message + '\n已回退：下一条消息将开启全新会话，原会话仍保留在 /session 列表中。')
-}
-
 /** Render an epoch-ms timestamp as YYYY-MM-DD HH:mm (local time) — the
  * /session list's retire and creation times share the format. */
 function formatTimestamp(ts: number): string {
   const d = new Date(ts)
   const pad = (n: number): string => String(n).padStart(2, '0')
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
-}
-
-/** Unwrap the host command execution outcome: dsh ≥0.1.5-rc.1 settles as
- * the `{ commandId, result: { kind, text } }` wrapper while older hosts
- * returned the flat `{ kind, text }` (and safely ignore the extra
- * attachments argument). undefined stays undefined — an admission miss
- * (unknown command name) under both host versions. */
-function unwrapCommandResult(
-  executed: { kind?: string; text?: string; result?: { kind?: string; text?: string } } | undefined,
-): { kind?: string; text?: string } | undefined {
-  if (executed === undefined) return undefined
-  return 'result' in executed ? executed.result : executed
-}
-
-/** /plan: forward to the HOST plan command so QQ enters/leaves host plan
- * mode (the host `/plan off` path exits directly, no Web review card). The
- * plugin no longer runs its own prefix plan mode — that duplicated the host
- * semantic and shadowed the host `/plan off` exit. */
-async function handlePlanCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  const chat = ctx.getChat(chatId)
-  if (chat === undefined) {
-    await ctx.sendToChat(chatId, '请先发一条消息建立会话，再 /plan。')
-    return
-  }
-  const commands = ctx.commands
-  if (commands === undefined) {
-    await ctx.sendToChat(chatId, '❌ 宿主未提供 commands 服务，无法切换计划模式。')
-    return
-  }
-  const line = arg.trim() === '' ? '/plan' : '/plan ' + arg.trim()
-  try {
-    // The host command runtime requires the attachments array (it reads
-    // `.length` unconditionally) and a signal (it reads `signal.aborted`
-    // unconditionally) — pass an empty array and a fresh never-aborted one;
-    // QQ user-initiated /plan must not be interruptible by our own
-    // cancellation.
-    const result = unwrapCommandResult(await commands.execute(chat.agent as never, line, [], new AbortController().signal))
-    const text = result?.text !== undefined && result.text !== '' ? result.text : (arg.trim().toLowerCase() === 'off' ? '已退出计划模式。' : '已进入计划模式。')
-    const hint = arg.trim().toLowerCase() === 'off' ? '' : '\n（QQ 退出计划模式：发 /plan off）'
-    await ctx.sendToChat(chatId, text + hint)
-    ctx.log('info', 'host plan command for ' + chatId + ': ' + line)
-  } catch (error) {
-    ctx.log('warn', 'host plan command failed: ' + String(error))
-    await ctx.sendToChat(chatId, '❌ 计划模式切换失败：' + describeError(error) + '\n可稍后重试；发 /plan 查看当前计划模式状态。')
-  }
-}
-
-/** QQ-side short aliases for /permission, resolved BEFORE forwarding: the
- * two default host presets get terse names. Full preset names pass through
- * untouched — the host owns the presets table (a deployment may override it
- * via cordis.patch.yml), and its unknown-name error reply lists the
- * available presets, which the plugin relays verbatim. */
-const PERMISSION_PRESET_ALIASES: Record<string, string> = {
-  w: 'workspace-write',
-  ws: 'workspace-write',
-  write: 'workspace-write',
-  工作区: 'workspace-write',
-  f: 'danger-full-access',
-  full: 'danger-full-access',
-  danger: 'danger-full-access',
-  全权: 'danger-full-access',
-}
-
-/** QQ shortcut hint: the bare-form parse-failure fallback and the ❌-relay
- * tail (the host lists its own presets; these are the QQ-side shortcuts). */
-const PERMISSION_USAGE_HINT = '（QQ 快捷用法：/permission w 切工作区可写+需审批、/permission f 切全盘+免审批；也支持完整预设名或序号）'
-
-/** /permission: show the current host permission preset (the bare form
- * renders the parsed Chinese menu: current + numbered available list + usage
- * line; on host-reply format drift it falls back to the verbatim relay + QQ
- * hint) or switch it (sandbox mode + approval policy, effective immediately
- * in the session). Same host-forwarding pattern as /plan. A pure number
- * indexes the available list the bare form parses, resolved live per
- * invocation — deliberately NO pending-selection snapshot: with two presets
- * a stored snapshot could only ever disagree with the host reply, so the
- * bare pre-flight is the single source of truth. */
-async function handlePermissionCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  const chat = ctx.getChat(chatId)
-  if (chat === undefined) {
-    await ctx.sendToChat(chatId, '请先发一条消息建立会话，再 /permission。')
-    return
-  }
-  const commands = ctx.commands
-  if (commands === undefined) {
-    await ctx.sendToChat(chatId, '❌ 宿主未提供 commands 服务，无法切换权限预设。')
-    return
-  }
-  // One host /permission execution: returns the settled reply (null when a
-  // failure was already reported to the chat). Same forwarding constraints
-  // as /plan — the host runtime reads submittedAttachments.length and
-  // signal.aborted unconditionally, so pass an empty array and a fresh
-  // never-aborted signal; a QQ-initiated switch must not be interruptible
-  // by our own cancellation.
-  const executeHost = async (line: string): Promise<{ ok: boolean; text: string } | null> => {
-    try {
-      const live = ctx.getChat(chatId)
-      if (live === undefined) return null
-      const result = unwrapCommandResult(await commands.execute(live.agent as never, line, [], new AbortController().signal))
-      if (result === undefined) {
-        // Host admission miss: /permission is only registered when the
-        // permission-presets plugin is composed on the host side.
-        await ctx.sendToChat(chatId, '❌ 宿主未注册 /permission 命令（未挂载权限预设插件）。')
-        return null
-      }
-      return { ok: result.kind !== 'error', text: result.text ?? '' }
-    } catch (error) {
-      ctx.log('warn', 'host permission command failed: ' + String(error))
-      await ctx.sendToChat(chatId, '❌ 权限预设切换失败：' + describeError(error) + '\n可稍后重试；发 /permission 查看当前权限。')
-      return null
-    }
-  }
-  const relayMarked = async (result: { ok: boolean; text: string }, preset: string): Promise<void> => {
-    // Success: the host's own reply is too terse ('preset X') — render the
-    // switch confirmation with the Chinese meaning label (deployment-custom
-    // preset names fall back to a fixed label). ❌ relays keep the host text
-    // verbatim and append the QQ usage hint so the failure is actionable
-    // without a second round-trip.
-    if (result.ok) {
-      await ctx.sendToChat(chatId, '✅ 已切换权限预设：' + preset + '（' + (PERMISSION_PRESET_LABELS[preset] ?? '部署自定义') + '）')
-      return
-    }
-    await ctx.sendToChat(chatId, '❌ ' + result.text + '\n' + PERMISSION_USAGE_HINT)
-  }
-  const trimmed = arg.trim()
-  if (trimmed === '') {
-    // Bare form: render the parsed host reply as a Chinese menu — current
-    // preset line, numbered available list (「← 当前」 marker + meaning label
-    // per preset) and the usage line. When the reply does not match the
-    // expected host shape, renderPermissionMenu falls back to the previous
-    // behavior (verbatim relay + QQ shortcut hint) instead of crashing.
-    const bare = await executeHost('/permission')
-    if (bare !== null) await ctx.sendToChat(chatId, renderPermissionMenu(bare.text))
-    return
-  }
-  if (/^\d+$/.test(trimmed)) {
-    // Pure number: index into the bare form's available list (live pre-flight).
-    const bare = await executeHost('/permission')
-    if (bare === null) return
-    const available = parseAvailablePresets(bare.text)
-    const preset = available[Number(trimmed) - 1]
-    if (preset === undefined) {
-      // Out-of-range index or unparsable list: fall back to the usage hint,
-      // relaying whatever the host replied so the real list stays visible.
-      const reply = '❌ 序号 ' + trimmed + ' 无法解释为可用预设。' + (bare.text !== '' ? '\n' + bare.text : '') + '\n' + PERMISSION_USAGE_HINT
-      await ctx.sendToChat(chatId, reply)
-      return
-    }
-    const switched = await executeHost('/permission ' + preset)
-    if (switched !== null) await relayMarked(switched, preset)
-    return
-  }
-  // Alias first (QQ-side, case-insensitive); anything else is forwarded
-  // verbatim as a full preset name — unknown names come back as the host's
-  // error reply (with the available list), relayed with the ❌ mark.
-  const preset = PERMISSION_PRESET_ALIASES[trimmed.toLowerCase()] ?? trimmed
-  const switched = await executeHost('/permission ' + preset)
-  if (switched !== null) await relayMarked(switched, preset)
-}
-
-/** Parse the 「(available: A, B)」 list out of a host permission reply (both
- * the bare listing and the unknown-preset error carry it). Returns [] when
- * the reply does not match the host's reply shape. */
-function parseAvailablePresets(text: string): string[] {
-  const m = /\(available: ([^)]*)\)/.exec(text)
-  if (m === null) return []
-  return m[1].split(',').map(s => s.trim()).filter(s => s !== '')
-}
-
-const PERMISSION_PRESET_LABELS: Record<string, string> = {
-  'workspace-write': '工作区可写+需审批',
-  'danger-full-access': '全盘+免审批',
-}
-
-/** The usage line that closes the bare-form menu. */
-const PERMISSION_USAGE = '用法：/permission <序号|w|f|完整名> 切换，立即生效'
-
-/** Parse the 「current preset X」 marker out of a host permission reply
- * (undefined when the reply does not match the host's reply shape). */
-function parseCurrentPreset(text: string): string | undefined {
-  return /current preset ([^\s(]+)/.exec(text)?.[1]
-}
-
-/** /permission bare form: the host reply parsed into a Chinese menu —
- * current preset line, numbered available list (「← 当前」 marker, meaning
- * label per preset, 「部署自定义」 for names outside the default two, never a
- * guess) and the usage line. Any parse failure (host reply format drift)
- * falls back to the previous behavior — verbatim relay + QQ shortcut hint —
- * and never throws. */
-function renderPermissionMenu(hostText: string): string {
-  const available = parseAvailablePresets(hostText)
-  const current = parseCurrentPreset(hostText)
-  if (available.length === 0 || current === undefined) {
-    return hostText + '\n' + PERMISSION_USAGE_HINT
-  }
-  const labelOf = (preset: string): string => PERMISSION_PRESET_LABELS[preset] ?? '部署自定义'
-  return [
-    '当前权限：' + current + '（' + labelOf(current) + '）',
-    '可用预设：',
-    ...available.map((p, i) => (i + 1) + '. ' + p + '（' + labelOf(p) + '）' + (p === current ? ' ← 当前' : '')),
-    PERMISSION_USAGE,
-  ].join('\n')
-}
-
-/** /goal: per-chat objective — recorded and reminded on each turn. */
-async function handleGoalCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  const v = arg.trim()
-  if (v === '') {
-    const goal = ctx.goal(chatId)
-    await ctx.sendToChat(chatId, '当前目标：' + (goal !== undefined && goal !== '' ? '\n' + goal : '（未设置）') + '\n用法：/goal <目标> 设置/更新；/goal clear 清除')
-    return
-  }
-  if (v.toLowerCase() === 'clear' || v === '删除' || v === '移除') {
-    ctx.deleteGoal(chatId)
-    await ctx.sendToChat(chatId, '✅ 目标已清除。')
-    return
-  }
-  ctx.setGoal(chatId, v)
-  await ctx.sendToChat(chatId, '✅ 目标已记录（每轮自动附带提醒）：\n' + v)
 }
 
 /** Current default model selection, best-effort (absent services return undefined). */
@@ -1434,33 +537,6 @@ function safeChatModel(chat: CommandChatView | undefined, ctx: CommandContext): 
   } catch (error) {
     ctx.log('debug', 'model.current failed: ' + String(error))
     return undefined
-  }
-}
-
-/** Enumerate the on-disk agent presets (<dsh-home>/.agent-presets/*). */
-async function listPresets(ctx: CommandContext): Promise<string[]> {
-  const home = ctx.dshHome
-  if (home === undefined || home === '') return []
-  const root = join(home, '.agent-presets')
-  try {
-    const entries = await readdir(root, { withFileTypes: true })
-    const out: string[] = []
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      let label = entry.name
-      try {
-        const text = await readFile(join(root, entry.name, 'preset.yml'), 'utf8')
-        const m = /^name\s*:\s*(.+?)\s*$/m.exec(text)
-        if (m !== null && m[1].trim() !== '') label = m[1].trim()
-      } catch {
-        // no preset.yml — fall back to the directory id
-      }
-      out.push(entry.name + (label !== entry.name ? '（' + label + '）' : ''))
-    }
-    return out.sort()
-  } catch (error) {
-    ctx.log('debug', 'preset enumeration failed: ' + String(error))
-    return []
   }
 }
 

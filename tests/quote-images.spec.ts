@@ -23,15 +23,14 @@ afterEach(async () => {
 
 async function quoted(data: QuotedMessageData | ((id: number) => QuotedMessageData), message: unknown[] = [reply, atBot, body], maxQuoteDepth?: number) {
   const getMsg = vi.fn((params: Record<string, unknown>) => typeof data === 'function' ? data(params.message_id as number) : data)
-  const ocr = vi.fn(() => ({ texts: [{ text: 'OCR result' }] }))
-  const h = await makeHarness({ maxQuoteDepth, respond: { get_msg: getMsg, ocr_image: ocr } })
+  const h = await makeHarness({ maxQuoteDepth, respond: { get_msg: getMsg } })
   open.push(h)
   h.client.send(JSON.stringify({
     post_type: 'message', message_type: 'group', user_id: 10001, group_id: 888, self_id: 10002,
     message, sender: { user_id: 10001, nickname: '提问者' },
   }))
   await vi.waitFor(() => expect(h.captured.followups).toHaveLength(1))
-  return { h, getMsg, ocr, text: h.captured.followups[0].text }
+  return { h, getMsg, text: h.captured.followups[0].text }
 }
 
 async function imageBytes(text: string) {
@@ -60,16 +59,6 @@ describe('quoted images through the OneBot bridge', () => {
     const { text } = await quoted({ [field]: '原文[CQ:image,file=base64://' + PHOTO.toString('base64') + ']' })
     expect(text).toContain('[引用]原文[图片:')
     expect(await imageBytes(text)).toEqual([PHOTO])
-  })
-
-  it('keeps the direct image as /ocr target when a different image is quoted', async () => {
-    const { h, text, ocr } = await quoted({ message: [image(STICKER)] }, [reply, atBot, body, image()])
-    expect(await imageBytes(text)).toEqual([STICKER, PHOTO])
-    h.client.send(JSON.stringify({
-      post_type: 'message', message_type: 'group', user_id: 10001, group_id: 888, self_id: 10002,
-      message: [atBot, { type: 'text', data: { text: '/ocr' } }], sender: { nickname: '提问者' },
-    }))
-    await vi.waitFor(() => expect(ocr).toHaveBeenCalledExactlyOnceWith({ image: 'base64://' + PHOTO.toString('base64') }))
   })
 
   it.each([

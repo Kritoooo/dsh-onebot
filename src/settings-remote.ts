@@ -56,10 +56,10 @@ import type { WorkspaceRegistryLike } from './bridge.js'
 export const ENTRY_ID = 'dsh-onebot'
 /** Typert Remote 命名空间 = cordis 服务键（T1 §4）。 */
 export const NAMESPACE = 'onebotSettings'
-/** 快照固定值：29 键均为插件级热重启生效（T1 §5；W1/W2 新增 6 布尔键同粒度）。 */
+/** 快照固定值：25 键均为插件级热重启生效（T1 §5；W1/W2 新增 6 布尔键同粒度）。 */
 export const REMOTE_EFFECT = 'restart'
 
-/** 设置页 UI 四组 29 键（T1 §4 + T9 autoSteerPolicy + T3 deferredTimeoutMs；与 src/index.ts Config schema 一一对应）。
+/** 设置页 UI 四组 25 键（T1 §4 + T9 autoSteerPolicy + T3 deferredTimeoutMs；与 src/index.ts Config schema 一一对应）。
  *  W6：permissions/behavior 三组 19 键保持不动，W1/W2 的 6 个布尔键独立成
  *  「diagnostics（诊断）」组——它们全部默认关（除 actionAuditEnabled 默认开）、
  *  属观测/调试面，与连接权限行为组的使用频率与风险等级都不同，独立分组让
@@ -70,7 +70,7 @@ export const SETTINGS_GROUPS: Readonly<Record<string, readonly string[]>> = {
   connection: ['mode', 'host', 'port', 'url', 'accessToken', 'botQQ', 'workspacePath'],
   permissions: ['requireMention', 'adminUsers', 'dmPolicy', 'groupPolicy', 'allowAllUsers', 'allowFrom', 'groupAllowFrom'],
   behavior: ['interimMessages', 'interimRecall', 'interimRecallMs', 'sendErrorNotice', 'unknownCommand', 'rateLimitPerMinute', 'newMessagePolicy', 'autoSteerPolicy', 'deferredTimeoutMs'],
-  diagnostics: ['actionAuditEnabled', 'traceEnabled', 'recordInbound', 'inboxRedact', 'injectEnabled', 'injectDryRun'],
+  diagnostics: ['actionAuditEnabled', 'traceEnabled'],
 }
 
 /** schema 默认值（T1 §4 表；摘自 src/index.ts:171-245），快照生效值的底层。 */
@@ -105,10 +105,6 @@ export const SCHEMA_DEFAULTS: Readonly<Record<string, unknown>> = {
   // W6：W1/W2 可观测/调试布尔键（schema 默认值摘自 src/index.ts:297-317）。
   actionAuditEnabled: true,
   traceEnabled: false,
-  recordInbound: false,
-  inboxRedact: false,
-  injectEnabled: false,
-  injectDryRun: true,
 }
 
 /** 快照返回侧脱敏的键（T1 §3 敏感字段行；写入侧明文落盘属宿主既有行为）。 */
@@ -138,11 +134,10 @@ const NUMBER_RANGE: Readonly<Record<string, readonly [number, number | undefined
  *  面板仅布尔开关与既有 19 键，调优键仍走 patch config 手改，取舍见 DEVLOG W6）。 */
 const BOOLEAN_KEYS: readonly string[] = [
   'requireMention', 'allowAllUsers', 'interimMessages', 'interimRecall', 'sendErrorNotice',
-  'actionAuditEnabled', 'traceEnabled', 'recordInbound', 'inboxRedact', 'injectEnabled', 'injectDryRun',
-]
+  'actionAuditEnabled', 'traceEnabled', ]
 const STRING_KEYS: readonly string[] = ['host', 'url', 'accessToken', 'botQQ', 'workspacePath']
 const STRING_ARRAY_KEYS: readonly string[] = ['adminUsers', 'allowFrom', 'groupAllowFrom']
-/** 全部 29 键（校验与快照的唯一键集；6 枚举 + 4 数字 + 11 布尔 + 5 字符串 + 3 字符串数组）。 */
+/** 全部 25 键（校验与快照的唯一键集；6 枚举 + 4 数字 + 11 布尔 + 5 字符串 + 3 字符串数组）。 */
 export const ALL_KEYS: readonly string[] = [
   ...Object.keys(ENUM_KEYS), ...NUMBER_KEYS, ...BOOLEAN_KEYS, ...STRING_KEYS, ...STRING_ARRAY_KEYS,
 ]
@@ -153,7 +148,7 @@ export interface OnebotSettingsSnapshot {
   revision: number
   /** dsh-onebot 条目 fiber 是否 active（fiber.state === 2，同 configEditor.edit 的活性判据）。 */
   entryActive: boolean
-  /** 28 键生效值；accessToken 脱敏为 ''。 */
+  /** 25 键生效值；accessToken 脱敏为 ''。 */
   config: Record<string, unknown>
   /** 脱敏键标记：明文是否已配置。 */
   secrets: Array<{ path: string[]; set: boolean }>
@@ -303,7 +298,7 @@ function resolveWorkspaceRegistry(ctx: { get(key: string): unknown } | undefined
   return registry !== undefined && registry !== null && typeof registry.list === 'function' ? registry : undefined
 }
 
-/** 28 键生效值 = schema 默认值 ← 条目 config 覆盖（T1 §3 合并优先级一句话）。 */
+/** 25 键生效值 = schema 默认值 ← 条目 config 覆盖（T1 §3 合并优先级一句话）。 */
 export function effectiveConfig(raw: Record<string, unknown>): Record<string, unknown> {
   const effective: Record<string, unknown> = {}
   for (const key of ALL_KEYS) {
@@ -332,7 +327,7 @@ function buildSnapshot(entry: ConfigEditorEntry, state: RevisionState): OnebotSe
   }
 }
 
-/** updateSettings 入参校验（T1 §4：28 键的任意子集，扁平 JSON）。未知键整单
+/** updateSettings 入参校验（T1 §4：25 键的任意子集，扁平 JSON）。未知键整单
  *  拒绝（不静默丢弃）；类型/枚举不符拒绝；具体取值合法性交由宿主 schemastery
  *  校验 + reconcile 失败自动回滚兜底（T1 §5）。 */
 export function validatePatch(patch: unknown): Record<string, unknown> {

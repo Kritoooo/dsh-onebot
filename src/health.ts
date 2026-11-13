@@ -27,7 +27,6 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { ACTION_AUDIT_FILE } from './outbound.js'
-import { INBOX_FILE, inboxRotatedFile } from './record.js'
 import { TRACE_FILE, traceRotatedFile } from './trace.js'
 import type { FailureRefRecord } from './ref.js'
 
@@ -48,10 +47,6 @@ export interface HealthDeps {
   dedup: { entries: number; windowSeconds: number }
   /** Write-gate snapshot. */
   writeGate: { minuteUsed: number; minuteLimit: number; dayUsed: number; dayLimit: number }
-  /** Recorder state (absent = recording off). */
-  recorder?: { enabled: boolean; redact: boolean; written: number } | undefined
-  /** Inject channel state (absent = channel off). */
-  inject?: { enabled: boolean; dryRun: boolean; consumed: number; intercepted: number; skippedHistory: number } | undefined
   /** The already-redacted config snapshot (see redactSnapshot). */
   configSnapshot: Record<string, unknown>
   /** Secret VALUES to scrub from every packed artifact (e.g. accessToken). */
@@ -122,10 +117,8 @@ export async function healthReport(deps: HealthDeps): Promise<string> {
   lines.push('重试/自愈：reverse 接管重试 ' + (retry.reverseRetryAttempts ?? '未知') + ' 次 · forward 重连 ' + (retry.reconnectAttempts ?? '未知') + ' 次 · 自愈中 ' + (retry.selfHealing === undefined ? '未知' : retry.selfHealing ? '是' : '否'))
   lines.push('去重窗口：' + deps.dedup.entries + ' 条在窗（dedupWindowSeconds=' + deps.dedup.windowSeconds + '）')
   lines.push('写闸门：本分钟 ' + deps.writeGate.minuteUsed + '/' + deps.writeGate.minuteLimit + ' · 今日 ' + deps.writeGate.dayUsed + '/' + deps.writeGate.dayLimit)
-  lines.push('录制：' + (deps.recorder?.enabled ? '开启（redact=' + (deps.recorder.redact ? 'on' : 'off') + '，已写 ' + deps.recorder.written + ' 行）' : '关闭'))
-  lines.push('注入：' + (deps.inject?.enabled ? '开启（dryRun=' + (deps.inject.dryRun ? 'on' : 'off') + '，已消费 ' + deps.inject.consumed + ' 行、拦截出站 ' + deps.inject.intercepted + ' 次、跳过历史 ' + deps.inject.skippedHistory + ' 条）' : '关闭'))
   const files: string[] = []
-  for (const [name, rotated] of [[TRACE_FILE, traceRotatedFile], [INBOX_FILE, inboxRotatedFile]] as const) {
+  for (const [name, rotated] of [[TRACE_FILE, traceRotatedFile]] as const) {
     const size = await fileSize(join(deps.mediaDir, name))
     files.push(name + ' ' + (size === undefined ? '无' : formatBytes(size) + rotatedSuffixInfo(deps.mediaDir, rotated)))
   }
@@ -248,9 +241,9 @@ export async function exportDiagnostics(deps: HealthDeps): Promise<string> {
 }
 
 function artifactNames(): string[] {
-  const names = [TRACE_FILE, INBOX_FILE, ACTION_AUDIT_FILE]
+  const names = [TRACE_FILE, ACTION_AUDIT_FILE]
   for (let i = 1; i <= 2; i++) {
-    names.push(traceRotatedFile(i), inboxRotatedFile(i))
+    names.push(traceRotatedFile(i))
   }
   return names
 }

@@ -488,7 +488,7 @@ describe('ChatBridge', () => {
     const h = await makeHarness()
     h.sendText('你好，帮我看看这个')
     await vi.waitFor(() => expect(h.captured.followups).toHaveLength(1))
-    expect(h.captured.followups[0].text).toBe('<user_message qq="10001" nickname="小明">\n你好，帮我看看这个\n</user_message>')
+    expect(h.captured.followups[0].text.replace(/^\[\d{2}:\d{2}\] /, '')).toBe('<user_message qq="10001" nickname="小明">\n你好，帮我看看这个\n</user_message>')
     h.ctx.emit('session/event', { id: h.sessionIds[0] } as never, makeEvent('assistant/message', {
       turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '这是回复' }] },
     }))

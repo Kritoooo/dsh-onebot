@@ -142,13 +142,21 @@ export function sanitizeNickname(nickname: string): string {
  * @param role - the sender's tier (权限分档 A1): admin → ·管理员, member → ·成员.
  * @returns the prefix string (never empty: always at least the time stamp).
  */
-export function buildGroupMessagePrefix(nickname: string, userId: string, mentioned: boolean, role: UserRole): string {
-  const now = new Date()
-  const hh = String(now.getHours()).padStart(2, '0')
-  const mm = String(now.getMinutes()).padStart(2, '0')
+export function buildGroupMessagePrefix(nickname: string, userId: string, mentioned: boolean, role: UserRole, seconds = 0): string {
   const mention = mentioned ? '[@我]' : ''
   const tier = role === 'admin' ? '管理员' : '成员'
-  return '[' + hh + ':' + mm + ' ' + nickname + '(' + userId + ')·' + tier + ']' + mention + ' '
+  return '[' + formatClock(seconds) + ' ' + nickname + '(' + userId + ')·' + tier + ']' + mention + ' '
+}
+
+/** OneBot Unix seconds, with missing/invalid/out-of-range times falling back to now. */
+export function formatClock(seconds: number): string {
+  const candidate = new Date(seconds * 1000)
+  const date = Number.isFinite(seconds) && seconds > 0 && Number.isFinite(candidate.getTime()) ? candidate : new Date()
+  return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
+}
+
+export function buildDirectMessagePrefix(seconds: number): string {
+  return '[' + formatClock(seconds) + '] '
 }
 
 /** Soft-cap prefix for restricted (member-role) group users. */
@@ -169,6 +177,7 @@ export const RESTRICTED_PREFIX = '[受限用户:仅问答] '
  * @param nickname - the sender display name (sanitized again defensively).
  * @returns the boundary-wrapped content.
  */
-export function wrapUserMessage(content: string, userId: string, nickname: string): string {
-  return '<user_message qq="' + userId + '" nickname="' + sanitizeNickname(nickname) + '">\n' + content + '\n</user_message>'
+export function wrapUserMessage(content: string, userId: string, nickname: string, messageId?: string): string {
+  const mid = messageId === undefined || messageId === '' ? '' : ' mid="' + sanitizeNickname(messageId) + '"'
+  return '<user_message qq="' + userId + '" nickname="' + sanitizeNickname(nickname) + '"' + mid + '>\n' + content + '\n</user_message>'
 }

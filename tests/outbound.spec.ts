@@ -214,53 +214,6 @@ describe('outbound pipeline', () => {
     await h.bridge.stop()
     await h.connection.stop()
   }, 30_000)
-
-  it('relays host plan books and option cards to the chat (exit_plan_mode / ask_user_question)', async () => {
-    const h = await makeCmdHarness()
-    h.sendText('你好')
-    await vi.waitFor(() => expect(h.captured.followups).toHaveLength(1))
-    const session = { id: h.sessionIds[0] }
-
-    // A plan review tool call (empty text block) must still reach QQ.
-    h.ctx.emit('session/event', session as never, makeEvent('assistant/message', {
-      turn: 1, step: 1, message: { role: 'assistant', id: 'relay-plan-1', content: [
-        { type: 'text', text: '' },
-        { type: 'tool-call', id: 'c1', name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '# 测试计划\n\n实现 A 与 B。' }) },
-      ] },
-    }))
-    await vi.waitFor(() => {
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('计划书'))).toBe(true)
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('实现 A 与 B'))).toBe(true)
-    })
-
-    // Re-emitting the same message id consecutively (streaming/usage) must not
-    // double-relay — dedupe keys on the latest handled id, re-emits arrive in order.
-    h.ctx.emit('session/event', session as never, makeEvent('assistant/message', {
-      turn: 1, step: 1, message: { role: 'assistant', id: 'relay-plan-1', content: [
-        { type: 'tool-call', id: 'c1', name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '# 测试计划\n\n实现 A 与 B。' }) },
-      ] },
-    }))
-    await new Promise(resolve => setTimeout(resolve, 100))
-    expect(h.outbound.filter(f => JSON.stringify(f.params).includes('计划书'))).toHaveLength(1)
-
-    // An option card (ask_user_question) with questions/options.
-    h.ctx.emit('session/event', session as never, makeEvent('assistant/message', {
-      turn: 1, step: 2, message: { role: 'assistant', id: 'relay-q-1', content: [
-        { type: 'tool-call', id: 'c2', name: 'ask_user_question', arguments: JSON.stringify({ questions: [
-          { id: 'q1', question: '选哪个方案？', options: [{ label: '方案A' }, { label: '方案B' }], multi_select: true },
-        ] }) },
-      ] },
-    }))
-    await vi.waitFor(() => {
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('选哪个方案？'))).toBe(true)
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('方案A'))).toBe(true)
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('可多选'))).toBe(true)
-    })
-
-    h.client.close()
-    await h.bridge.stop()
-    await h.connection.stop()
-  })
 })
 
 describe('outbound proactive-write gate (W2-③)', () => {

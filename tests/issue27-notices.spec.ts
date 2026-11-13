@@ -19,7 +19,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { ANSWER_ACCEPTED_NOTICE, QUEUE_NOTICE_TEXT } from '../src/bridge.js'
+import { QUEUE_NOTICE_TEXT } from '../src/bridge.js'
 import { resolveNoticeText } from '../src/notices.js'
 import { DEFERRED_REGISTRY_FILE } from '../src/deferred.js'
 import { STEER_ACCEPTED_NOTICE } from '../src/commands.js'
@@ -144,49 +144,6 @@ describe('notices.steerAccepted', () => {
     await new Promise(resolve => setTimeout(resolve, 150))
     expect(sentTexts(h.outbound).some(t => t.includes(STEER_ACCEPTED_NOTICE))).toBe(false)
     expect(sentTexts(h.outbound).some(t => t.includes('补充指令'))).toBe(false)
-    h.client.close()
-    await h.bridge.stop()
-    await h.connection.stop()
-  })
-})
-
-describe('notices.answerAccepted', () => {
-  /** 既有 spec（ask-bridge）覆盖默认文案；此处走同一条 pending 拦截路径。 */
-  const questionBlock = (messageId: string) => ({
-    turn: 1, step: 2, message: { role: 'assistant', id: messageId, content: [
-      { type: 'tool-call', id: 'c2', name: 'ask_user_question', arguments: JSON.stringify({ questions: [
-        { id: 'q1', question: '选哪个方案？', options: [{ label: '方案A' }, { label: '方案B' }], multi_select: true },
-      ] }) },
-    ] },
-  })
-
-  it('自定义 string：回答回执改用自定义文案', async () => {
-    const answer = vi.fn(async () => true)
-    const h = await makeCmdHarness({ userQuestions: { askTimed: async () => ({ pending: true, callId: 'c2' }), answer }, notices: { answerAccepted: '📨 自定义回答回执' } })
-    h.sendText('你好')
-    await vi.waitFor(() => expect(h.captured.followups).toHaveLength(1))
-    h.ctx.emit('session/event', { id: h.sessionIds[0] } as never, makeEvent('assistant/message', questionBlock('relay-q-t1')))
-    await vi.waitFor(() => expect(sentTexts(h.outbound).some(t => t.includes('回复编号或字母选择'))).toBe(true))
-    h.sendText('1,2')
-    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1))
-    await vi.waitFor(() => expect(sentTexts(h.outbound).some(t => t.includes('自定义回答回执'))).toBe(true))
-    expect(sentTexts(h.outbound).some(t => t.includes(ANSWER_ACCEPTED_NOTICE))).toBe(false)
-    h.client.close()
-    await h.bridge.stop()
-    await h.connection.stop()
-  })
-
-  it.each([false, ''] as const)('notices.answerAccepted=%j：回答回执不发（结算照常）', async (value) => {
-    const answer = vi.fn(async () => true)
-    const h = await makeCmdHarness({ userQuestions: { askTimed: async () => ({ pending: true, callId: 'c2' }), answer }, notices: { answerAccepted: value } })
-    h.sendText('你好')
-    await vi.waitFor(() => expect(h.captured.followups).toHaveLength(1))
-    h.ctx.emit('session/event', { id: h.sessionIds[0] } as never, makeEvent('assistant/message', questionBlock('relay-q-t2')))
-    await vi.waitFor(() => expect(sentTexts(h.outbound).some(t => t.includes('回复编号或字母选择'))).toBe(true))
-    h.sendText('1,2')
-    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1))
-    await new Promise(resolve => setTimeout(resolve, 150))
-    expect(sentTexts(h.outbound).some(t => t.includes(ANSWER_ACCEPTED_NOTICE))).toBe(false)
     h.client.close()
     await h.bridge.stop()
     await h.connection.stop()

@@ -23,7 +23,6 @@ type Context = CordisContext & {
     sessions: SessionStore;
     agentDefaultModel: {
         currentSelection(): ModelSelection | undefined;
-        saveSelection(next: ModelSelection): Promise<void>;
     };
     agentPresets: {
         readonly defaultId: string;
@@ -39,8 +38,6 @@ type Context = CordisContext & {
          * undefined when the id owns no durable log (the retired `inspect`
          * convenience no longer exists on the host service). */
         stat(id: string): Promise<object | undefined>;
-        /** /session list previews: open a stored session read-only (never takes
-         * write ownership), read the header + a small event prefix, then close. */
         open(id: string, access: 'read'): Promise<{
             header: {
                 createdAt?: number;
@@ -83,29 +80,6 @@ type Context = CordisContext & {
             sessionIds: readonly string[];
         }>;
     };
-    commands: {
-        execute(agent: unknown, line: string, submittedAttachments: readonly unknown[], signal: AbortSignal): Promise<{
-            kind?: string;
-            text?: string;
-            result?: {
-                kind?: string;
-                text?: string;
-            };
-        }>;
-    };
-    /** T2-B1/B3: the host userQuestions service (dsh-base registers it). Not in
-     * the inject list on purpose — a deployment without it must degrade to "no
-     * ask_user_question tool / no answer interception", never block the load. */
-    userQuestions?: {
-        askTimed(request: unknown, callId: string, timeoutMs: number): Promise<unknown>;
-        answer(agent: unknown, callId: string, payload: {
-            answers: Array<{
-                id: string;
-                selected: string[];
-                custom?: string;
-            }>;
-        }): Promise<boolean>;
-    };
 };
 export declare const name = "dsh-onebot";
 export declare const inject: string[];
@@ -120,6 +94,8 @@ export interface Config {
     reconnectMaxAttempts: number;
     botQQ: string;
     requireMention: boolean;
+    /** Poke notices are opt-in and follow the existing QQ access policy. */
+    pokeEnabled: boolean;
     /** Unknown slash-command handling: intercept（默认）=拦截并给建议；passthrough=透传给模型。 */
     unknownCommand: 'intercept' | 'passthrough';
     /** T2 (P1): 任务运行中的新消息处理策略：queue=排队（默认）；steer=插话进当前任务。 */
@@ -145,7 +121,6 @@ export interface Config {
     notices: {
         steerAccepted?: boolean | string;
         queue?: boolean | string;
-        answerAccepted?: boolean | string;
         deferredTimeout?: boolean | string;
         rateLimited?: boolean | string;
     };
@@ -213,16 +188,6 @@ export interface Config {
     traceEnabled: boolean;
     /** W1: trace level; 'warn' records only ok:false (rejected/failed/dropped) events. */
     traceLevel: 'debug' | 'warn';
-    /** W1/T5: record every inbound event into mediaDir/qq-inbox.jsonl (default off). */
-    recordInbound: boolean;
-    /** W1/T5: mask 6+ digit runs (QQ/group numbers) in the recording (default off). */
-    inboxRedact: boolean;
-    /** W1/T5 (DEBUG-ONLY): enable the qq-inject.jsonl injection channel (default off). */
-    injectEnabled: boolean;
-    /** W1/T5: intercept all outbound writes of injected rounds (default true). */
-    injectDryRun: boolean;
-    /** W1/T5: inject queue poll interval in ms (min 500). */
-    injectIntervalMs: number;
     /** Console log gate: messages below this level are dropped (debug < info < warn < error). */
     logLevel: 'debug' | 'info' | 'warn' | 'error';
 }

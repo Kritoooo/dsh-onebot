@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { writeFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 
 import { apply, Config, name, defaultMediaDir } from '../src/index.js'
@@ -15,6 +16,7 @@ import { apply, Config, name, defaultMediaDir } from '../src/index.js'
 const bridgeDepsCaptured = vi.hoisted(() => [] as Array<{ config?: { monoFamilies?: readonly string[] } }>)
 /** Issue #37: start/stop call counters so the failure-rollback is observable. */
 const bridgeLifecycle = vi.hoisted(() => ({ startCalls: 0, stopCalls: 0 }))
+const pokeInbound = vi.hoisted(() => [] as unknown[])
 vi.mock('../src/bridge.js', () => ({
   ChatBridge: class {
     constructor(deps: { config?: { monoFamilies?: readonly string[] } }) {
@@ -26,35 +28,8 @@ vi.mock('../src/bridge.js', () => ({
     async stop(): Promise<void> {
       bridgeLifecycle.stopCalls++
     }
-  },
-}))
-
-/**
- * T3 lifecycle regression: mock InjectChannel so start() can be suspended on
- * a gate, letting the test unload the plugin while start is still in flight.
- * startCompleted mirrors the real channel's invariant that arming the poll
- * timer happens only after the awaited history skip (inject.ts start()).
- */
-const injectLifecycle = vi.hoisted(() => ({
-  startCalls: 0,
-  stopCalls: 0,
-  startCompleted: false,
-  stopAfterStartCompleted: false,
-  releaseStart: null as null | (() => void),
-}))
-vi.mock('../src/inject.js', () => ({
-  InjectChannel: class {
-    async start(): Promise<void> {
-      injectLifecycle.startCalls++
-      injectLifecycle.startCompleted = false
-      await new Promise<void>(resolve => {
-        injectLifecycle.releaseStart = resolve
-      })
-      injectLifecycle.startCompleted = true
-    }
-    async stop(): Promise<void> {
-      injectLifecycle.stopCalls++
-      injectLifecycle.stopAfterStartCompleted = injectLifecycle.startCompleted
+    async handleInbound(event: unknown): Promise<void> {
+      pokeInbound.push(event)
     }
   },
 }))
@@ -110,11 +85,41 @@ function makeCtx() {
 }
 
 describe('plugin entry', () => {
+  it('does not activate removed recording or injection switches from old config', async () => {
+    const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-legacy-debug-'))
+    const { ctx } = makeCtx()
+    const effect = vi.spyOn(ctx, 'effect')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const before = pokeInbound.length
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    let dispose: (() => Promise<void>) | undefined
+    try {
+      apply(ctx as never, Config({
+        mediaDir, workspacePath: mediaDir, port: 0, botQQ: '10002', accessToken: 'test-token',
+        recordInbound: true, injectEnabled: true, injectDryRun: false,
+      }))
+      dispose = effect.mock.results[0].value as () => Promise<void>
+      await vi.waitFor(() => expect(log.mock.calls.some(call => String(call[0]).includes('mounted'))).toBe(true))
+      await writeFile(join(mediaDir, 'qq-inject.jsonl'), JSON.stringify({
+        post_type: 'message', message_type: 'private', user_id: 10001, message: 'must not be injected',
+      }) + '\n')
+      await vi.advanceTimersByTimeAsync(2_500)
+      expect(pokeInbound).toHaveLength(before)
+      const deps = bridgeDepsCaptured.at(-1) as { config: Record<string, unknown> }
+      expect(deps.config).not.toHaveProperty('recorder')
+      expect(deps.config).not.toHaveProperty('inject')
+    } finally {
+      await dispose?.()
+      vi.useRealTimers()
+      log.mockRestore()
+    }
+  })
   it('validates config defaults', () => {
     const config = Config({})
     expect(config.mode).toBe('reverse')
     expect(config.port).toBe(8643)
     expect(config.requireMention).toBe(true)
+    expect(config.pokeEnabled).toBe(false)
     expect(config.unknownCommand).toBe('intercept')
     expect(config.sttModel).toBe('small')
   })
@@ -144,6 +149,21 @@ describe('plugin entry', () => {
     expect(effectSpy).toHaveBeenCalled()
     const disposer = effectSpy.mock.results[0].value as () => Promise<void>
     await disposer()
+  })
+
+  it.each([false, true])('wires pokeEnabled=%s through the plugin entry', async enabled => {
+    const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-plugin-poke-'))
+    const { ctx } = makeCtx()
+    const effect = vi.spyOn(ctx, 'effect')
+    const before = pokeInbound.length
+    apply(ctx as never, Config({ mediaDir, workspacePath: mediaDir, port: 0, accessToken: 'test-token', botQQ: '10002', pokeEnabled: enabled, sttEnabled: false }))
+    try {
+      const { connection } = bridgeDepsCaptured.at(-1) as unknown as { connection: import('../src/connection.js').OneBotConnection }
+      connection.onNotice({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 10001, target_id: 10002 })
+      expect(pokeInbound.length - before).toBe(enabled ? 1 : 0)
+    } finally {
+      await (effect.mock.results[0].value as () => Promise<void>)()
+    }
   })
 
   it('warns once at mount when workspacePath is unset; silent when configured (T3 方案 B)', () => {
@@ -219,73 +239,5 @@ describe('plugin entry', () => {
     }))
     expect(bridgeDepsCaptured).toHaveLength(1)
     expect(bridgeDepsCaptured[0]?.config?.monoFamilies).toEqual(['Cascadia Code', 'Consolas'])
-  })
-
-  it('T3 lifecycle: unload while injectChannel.start() is still pending waits for start, then unwinds exactly once', async () => {
-    const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-plugin-'))
-    const { ctx } = makeCtx()
-    injectLifecycle.startCalls = 0
-    injectLifecycle.stopCalls = 0
-    injectLifecycle.startCompleted = false
-    injectLifecycle.stopAfterStartCompleted = false
-    const effectSpy = vi.spyOn(ctx as { effect: (cb: () => unknown, label?: string) => unknown }, 'effect')
-    apply(ctx as never, Config({
-      mediaDir,
-      port: 0,
-      accessToken: 'test-token',
-      botQQ: '10002',
-      sttEnabled: false,
-      sensitivePatterns: [],
-      injectEnabled: true,
-    }))
-
-    // start 链已启动但被闸门挂起：start 调用过恰一次、尚未完成
-    // （effect 回调由宿主调度执行，用 waitFor 等到 start 已进入闸门）
-    await vi.waitFor(() => expect(injectLifecycle.startCalls).toBe(1))
-    expect(injectLifecycle.startCompleted).toBe(false)
-    const disposer = effectSpy.mock.results[0].value as () => Promise<void>
-    const disposed = disposer()
-    // 放行全部微任务/宏任务：修复前 stop 会在此处穿插进未完成的 start
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(injectLifecycle.stopCalls).toBe(0)
-
-    // 放行 start：清理必须在 start 完成后展开，且恰一次（无重复注入、无悬挂 timer/监听）
-    injectLifecycle.releaseStart?.()
-    await disposed
-    expect(injectLifecycle.startCalls).toBe(1)
-    expect(injectLifecycle.stopCalls).toBe(1)
-    expect(injectLifecycle.stopAfterStartCompleted).toBe(true)
-  })
-
-  it('T2-board: two-phase lifecycle log — mounted prints only after the start chain settles', async () => {
-    const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-plugin-'))
-    const { ctx } = makeCtx()
-    injectLifecycle.startCalls = 0
-    injectLifecycle.startCompleted = false
-    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-    try {
-      const effectSpy = vi.spyOn(ctx as { effect: (cb: () => unknown, label?: string) => unknown }, 'effect')
-      apply(ctx as never, Config({
-        mediaDir,
-        port: 0,
-        accessToken: 'test-token',
-        botQQ: '10002',
-        sttEnabled: false,
-        sensitivePatterns: [],
-        injectEnabled: true,
-      }))
-      const texts = () => log.mock.calls.map(c => String(c[0]))
-      // start 链已进入闸门：starting 已打印，mounted 尚未打印（旧实现此间就打印 mounted）。
-      await vi.waitFor(() => expect(injectLifecycle.startCalls).toBe(1))
-      expect(texts().some(t => t.startsWith('[dsh-onebot] starting (mode='))).toBe(true)
-      expect(texts().some(t => t.startsWith('[dsh-onebot] mounted'))).toBe(false)
-      // 放行 start：mounted 在整条链完成后才出现。
-      injectLifecycle.releaseStart?.()
-      await vi.waitFor(() => expect(texts().some(t => t.startsWith('[dsh-onebot] mounted (mode='))).toBe(true))
-      const disposer = effectSpy.mock.results[0].value as () => Promise<void>
-      await disposer()
-    } finally {
-      log.mockRestore()
-    }
   })
 })

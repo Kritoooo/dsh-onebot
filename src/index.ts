@@ -17,7 +17,7 @@ import type { SessionStore } from '@deepseek-ai/dsh-session'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type Z from '@deepseek-ai/schemastery'
 import type { OneBotEvent } from './connection.js'
-import type { BridgeDeps, WorkspaceRegistryLike } from './bridge.js'
+import type { WorkspaceRegistryLike } from './bridge.js'
 import type { AccessPolicyConfig } from './chat.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -36,12 +36,10 @@ let VOICE_MAX_BYTES: number
 let MEDIA_MAX_BYTES: number
 let Transcriber: typeof import('./stt.js').Transcriber
 let TraceSink: typeof import('./trace.js').TraceSink
-let InboundRecorder: typeof import('./record.js').InboundRecorder
-let InjectChannel: typeof import('./inject.js').InjectChannel
 let redactSnapshot: typeof import('./health.js').redactSnapshot
 let describeError: typeof import('./errors.js').describeError
 let configureSendSegments: typeof import('./tools.js').configureSendSegments
-let resolveUserQuestions: typeof import('./ask-tool.js').resolveUserQuestions
+let createPokeHandler: typeof import('./poke.js').createPokeHandler
 
 try {
   ;({ default: z } = await import('@deepseek-ai/schemastery'))
@@ -50,12 +48,10 @@ try {
   ;({ MediaStore, IMAGE_MAX_BYTES, VOICE_MAX_BYTES, MEDIA_MAX_BYTES } = await import('./media.js'))
   ;({ Transcriber } = await import('./stt.js'))
   ;({ TraceSink } = await import('./trace.js'))
-  ;({ InboundRecorder } = await import('./record.js'))
-  ;({ InjectChannel } = await import('./inject.js'))
   ;({ redactSnapshot } = await import('./health.js'))
   ;({ describeError } = await import('./errors.js'))
   ;({ configureSendSegments } = await import('./tools.js'))
-  ;({ resolveUserQuestions } = await import('./ask-tool.js'))
+  ;({ createPokeHandler } = await import('./poke.js'))
 } catch (error) {
   console.error('[dsh-onebot] 挂载失败：peer 依赖解析失败或关键模块缺失 —— 部署副本必须带完整 node_modules 链接集（scripts/link-host.sh 产物），只复制 lib/ 不够。原始错误：' + (error instanceof Error ? error.message : String(error)))
   throw error
@@ -66,7 +62,7 @@ type Context = CordisContext & {
   systemPrompt: SystemPrompt
   agents: AgentRegistry
   sessions: SessionStore
-  agentDefaultModel: { currentSelection(): ModelSelection | undefined; saveSelection(next: ModelSelection): Promise<void> }
+  agentDefaultModel: { currentSelection(): ModelSelection | undefined }
   agentPresets: {
     readonly defaultId: string
     resolve(id?: string): Promise<{ id: string }>
@@ -77,8 +73,7 @@ type Context = CordisContext & {
      * undefined when the id owns no durable log (the retired `inspect`
      * convenience no longer exists on the host service). */
     stat(id: string): Promise<object | undefined>
-    /** /session list previews: open a stored session read-only (never takes
-     * write ownership), read the header + a small event prefix, then close. */
+
     open(id: string, access: 'read'): Promise<{
       header: { createdAt?: number; agentPreset?: string }
       read(offset?: number, length?: number): Promise<{ events: readonly { type?: string; data?: { agentPreset?: string; source?: { kind?: string }; content?: readonly { type?: string; text?: string }[] } }[] }>
@@ -90,20 +85,10 @@ type Context = CordisContext & {
     create(path: string, title?: string): Promise<{ id: string; path: string; sessionIds: readonly string[]; attachSession(sessionId: string): Promise<void> }>
     list(): Array<{ id: string; path: string; sessionIds: readonly string[] }>
   }
-  commands: {
-    execute(agent: unknown, line: string, submittedAttachments: readonly unknown[], signal: AbortSignal): Promise<{ kind?: string; text?: string; result?: { kind?: string; text?: string } }>
-  }
-  /** T2-B1/B3: the host userQuestions service (dsh-base registers it). Not in
-   * the inject list on purpose — a deployment without it must degrade to "no
-   * ask_user_question tool / no answer interception", never block the load. */
-  userQuestions?: {
-    askTimed(request: unknown, callId: string, timeoutMs: number): Promise<unknown>
-    answer(agent: unknown, callId: string, payload: { answers: Array<{ id: string; selected: string[]; custom?: string }> }): Promise<boolean>
-  }
 }
 
 export const name = 'dsh-onebot'
-export const inject = ['tools', 'systemPrompt', 'agents', 'sessions', 'agentDefaultModel', 'agentPresets', 'sessionPersistence', 'workspaceRegistry', 'commands', 'llm']
+export const inject = ['tools', 'systemPrompt', 'agents', 'sessions', 'agentDefaultModel', 'agentPresets', 'sessionPersistence', 'workspaceRegistry']
 
 /** Plugin configuration (validated by schemastery). */
 export interface Config {
@@ -116,6 +101,8 @@ export interface Config {
   reconnectMaxAttempts: number
   botQQ: string
   requireMention: boolean
+  /** Poke notices are opt-in and follow the existing QQ access policy. */
+  pokeEnabled: boolean
   /** Unknown slash-command handling: intercept（默认）=拦截并给建议；passthrough=透传给模型。 */
   unknownCommand: 'intercept' | 'passthrough'
   /** T2 (P1): 任务运行中的新消息处理策略：queue=排队（默认）；steer=插话进当前任务。 */
@@ -138,7 +125,7 @@ export interface Config {
   interimRecall: boolean
   sendErrorNotice: boolean
   /** T8/#27: auto-receipt notice switches — boolean, or a custom text string. */
-  notices: { steerAccepted?: boolean | string, queue?: boolean | string, answerAccepted?: boolean | string, deferredTimeout?: boolean | string, rateLimited?: boolean | string }
+  notices: { steerAccepted?: boolean | string, queue?: boolean | string, deferredTimeout?: boolean | string, rateLimited?: boolean | string }
   /** T14 (#6 补充): qq_send_segments 插件页开关与分段发送间隔（呼吸感）。 */
   segments: { enabled: boolean, intervalMs: number }
   /** Per-chat per-minute sliding-window cap for normal (non-command) messages; 0 disables. */
@@ -198,16 +185,6 @@ export interface Config {
   traceEnabled: boolean
   /** W1: trace level; 'warn' records only ok:false (rejected/failed/dropped) events. */
   traceLevel: 'debug' | 'warn'
-  /** W1/T5: record every inbound event into mediaDir/qq-inbox.jsonl (default off). */
-  recordInbound: boolean
-  /** W1/T5: mask 6+ digit runs (QQ/group numbers) in the recording (default off). */
-  inboxRedact: boolean
-  /** W1/T5 (DEBUG-ONLY): enable the qq-inject.jsonl injection channel (default off). */
-  injectEnabled: boolean
-  /** W1/T5: intercept all outbound writes of injected rounds (default true). */
-  injectDryRun: boolean
-  /** W1/T5: inject queue poll interval in ms (min 500). */
-  injectIntervalMs: number
   /** Console log gate: messages below this level are dropped (debug < info < warn < error). */
   logLevel: 'debug' | 'info' | 'warn' | 'error'
 }
@@ -250,6 +227,8 @@ export const Config: Z<Config> = z.object({
     .description('机器人自身 QQ 号；留空则从 meta 事件自动学习'),
   requireMention: z.boolean().default(true)
     .description('群聊是否仅在 @机器人（或回复其消息）时响应'),
+  pokeEnabled: z.boolean().default(false)
+    .description('戳一戳唤醒：默认关闭；开启后仅响应明确戳向本机器人的事件，同一会话同一发起者 3 秒节流，仍执行私聊/群聊白名单与限流'),
   unknownCommand: z.union([z.const('intercept'), z.const('passthrough')]).default('intercept')
     .description('未知斜杠命令处理：intercept（默认）=拦截并提示相近命令或 /help；passthrough=透传给模型（旧行为）'),
   newMessagePolicy: z.union([z.const('queue'), z.const('steer')]).default('queue')
@@ -287,8 +266,6 @@ export const Config: Z<Config> = z.object({
       .description('steer 模式下补充指令受理后的自动回执文案：false=不发自动回执；true/缺省=默认文案；非空 string=自定义文案（/steer 命令确认同样改用，false 时不影响命令确认）；空串=不发'),
     queue: z.union([z.boolean(), z.string()]).default(true)
       .description('消息排队提示文案（每个运行回合至多一条）：false=不发；true/缺省=默认文案；非空 string=自定义文案；空串=不发'),
-    answerAccepted: z.union([z.boolean(), z.string()]).default(true)
-      .description('问题回答回执（✔ 已提交回答）文案：false=不发；true/缺省=默认文案；非空 string=自定义文案；空串=不发'),
     deferredTimeout: z.union([z.boolean(), z.string()]).default(true)
       .description('等待模型回复超时提示文案：false=不发；true/缺省=默认文案；非空 string=自定义文案；空串=不发'),
     rateLimited: z.union([z.boolean(), z.string()]).default(true)
@@ -382,16 +359,6 @@ export const Config: Z<Config> = z.object({
     .description('链路追踪（W1）：为每条入站消息生成 traceId 并贯穿入站→模型回合→出站，决策事件（含限流/去重/白名单/@ 门控/闸门拒发与每个静默丢弃分支的中文 reason）逐行 JSON 落盘 mediaDir/qq-trace.jsonl（4MiB 改名轮转，保留 qq-trace.1/2.jsonl；同一原因 5 分钟限频）；默认关闭——关闭时不生成 traceId、不落盘、决策行为与 0.6.0 完全一致'),
   traceLevel: z.union([z.const('debug'), z.const('warn')]).default('debug')
     .description('追踪事件级别（W1）：debug=记录全部决策事件；warn=仅记录 ok:false（被拒/失败/丢弃）事件'),
-  recordInbound: z.boolean().default(false)
-    .description('入站录制（W1）：把收到的每条入站事件（含被门控跳过的，附当时决策 reason）按可回放形状逐行 JSON 追加写 mediaDir/qq-inbox.jsonl（2MiB 改名轮转，保留 qq-inbox.1/2.jsonl；注入的帧不会被二次录制）；纯旁路：写失败仅 warn 限频，绝不影响回复管线；默认关闭——零文件零开销'),
-  inboxRedact: z.boolean().default(false)
-    .description('录制脱敏（W1）：落盘前把帧中 6 位以上的数字串（QQ 号/群号等）脱敏为前 3 位+****（数字型 id 字段一并处理），便于把录制文件发给别人离线回放；默认关闭'),
-  injectEnabled: z.boolean().default(false)
-    .description('事件注入通道（W1，仅调试用——信任边界：注入是调试通道，默认全关，勿在生产开启）：开启后按 injectIntervalMs 轮询 mediaDir/qq-inject.jsonl，把新行喂进真实入站管线（trace 事件标 stage=inject）；启动时已存在的历史行跳过并记一条说明；默认关闭'),
-  injectDryRun: z.boolean().default(true)
-    .description('注入干跑（W1）：true（默认，强烈建议保持）=注入回合触发的全部出站写操作（发消息/撤回等，含异步模型回合的最终回复——拦截点在出站动作层）被拦截计数、原文进 trace 事件、绝不真发 QQ；false=注入内容会真实发送，仅限隔离环境实验'),
-  injectIntervalMs: z.number().default(2000)
-    .description('注入队列轮询间隔（毫秒，W1；最小 500）'),
   logLevel: z.union([z.const('debug'), z.const('info'), z.const('warn'), z.const('error')]).default('info')
     .description('控制台日志级别门槛（debug < info < warn < error）：低于该级别的日志不输出。debug=全部输出（含「session 事件早退」等调试行）；info=常规信息（启动、连接建立、meta 事件等，默认）；warn=仅警告与错误；error=仅错误'),
 })
@@ -492,23 +459,6 @@ export function apply(ctx: Context, config: Config): void {
   const traceSink = config.traceEnabled
     ? new TraceSink({ dir: mediaDir, level: config.traceLevel, log: (level, message) => log(level, message) })
     : undefined
-  // W1/T5: the inbound recorder exists only when recordInbound is on (pure
-  // bypass: its own writer, failures only warn); the inject channel only
-  // when injectEnabled is on (DEBUG-ONLY) — both absent by default.
-  const recorder = config.recordInbound
-    ? new InboundRecorder({ dir: mediaDir, redact: config.inboxRedact, log: (level, message) => log(level, message) })
-    : undefined
-  const injectChannel: import('./inject.js').InjectChannel | undefined = config.injectEnabled
-    ? new InjectChannel({
-        dir: mediaDir,
-        dryRun: config.injectDryRun,
-        intervalMs: config.injectIntervalMs,
-        handleEvent: async (event: import('./connection.js').OneBotEvent): Promise<void> =>
-          bridge.handleInbound(event, { injected: true }),
-        trace: traceSink,
-        log: (level, message) => log(level, message),
-      })
-    : undefined
   const transcriber = new Transcriber({
     enabled: config.sttEnabled,
     engine: config.sttEngine,
@@ -523,6 +473,15 @@ export function apply(ctx: Context, config: Config): void {
   connection.onMeta = (event: OneBotEvent) => {
     logMetaEvent(connection.selfId, event, config.logLevel)
   }
+  connection.onNotice = createPokeHandler({
+    pokeEnabled: config.pokeEnabled,
+    selfId: () => connection.selfId || config.botQQ,
+    dispatch: event => {
+      void bridge.handleInbound(event).catch(error => {
+        log('warn', '戳一戳处理失败: ' + describeError(error))
+      })
+    },
+  })
   // W2-②③ gate keys: BridgeConfig (bridge.ts) keeps its declared shape; the
   // pipelines read them off the runtime object via optional intersection
   // members (see InboundContext/OutboundContext.config), so the spread here
@@ -546,24 +505,12 @@ export function apply(ctx: Context, config: Config): void {
         log('debug', 'loader.await failed: ' + describeError(error))
       }
     },
-    // Live llm lookup per call — same semantics as the pre-port live getter.
-    llmCatalog: {
-      listProviders: () => ctx.llm.listProviders(),
-      listModels: provider => ctx.llm.listModels(provider),
-    },
     connection,
-    dshHome: dshHome(),
     media,
     transcriber,
     agents: ctx.agents,
     sessions: ctx.sessions,
     agentPresets: ctx.agentPresets,
-    commands: ctx.commands as BridgeDeps['commands'],
-    // Live lookup per read: patch line order does not decide load order, so the
-    // service may arrive after this plugin applied.
-    get userQuestions() {
-      return resolveUserQuestions(ctx)
-    },
     sessionPersistence: ctx.sessionPersistence,
     workspaceRegistry: ctx.workspaceRegistry as unknown as WorkspaceRegistryLike,
     agentDefaultModel: ctx.agentDefaultModel,
@@ -608,8 +555,6 @@ export function apply(ctx: Context, config: Config): void {
       chatIdleEvictDays: config.chatIdleEvictDays,
       ...gateConfig,
       trace: traceSink,
-      recorder,
-      inject: injectChannel,
     },
     policy,
     // W1/T5 health: the config snapshot is redacted at the source — secrets
@@ -625,7 +570,7 @@ export function apply(ctx: Context, config: Config): void {
   connection.onFailure = (stage: string, detail: string): string => bridge.registerConnectionFailure(stage, detail)
 
   // Lifecycle: start the bridge and transport; unwind everything on unload.
-  // The effect body is async (cordis AsyncEffect): injectChannel.start() must
+
   // be awaited — it skips history before arming its poll timer, and a stop
   // landing before start completes would leave a dangling timer. The effect's
   // disposer is awaitable and dispose waits for the setup promise to settle
@@ -641,13 +586,11 @@ export function apply(ctx: Context, config: Config): void {
     try {
       await bridge.start()
       await connection.start()
-      await injectChannel?.start()
     } catch (error) {
       // #37: an async-effect rejection is swallowed by cordis (task?.catch —
       // no log, fiber stays active). Surface the failure and unwind the
       // already-started chain (same order as the disposer) before rethrowing.
       log('error', 'dsh-onebot 启动失败: ' + describeError(error))
-      await injectChannel?.stop()
       await bridge.stop()
       await connection.stop()
       throw error
@@ -655,7 +598,6 @@ export function apply(ctx: Context, config: Config): void {
     console.log('[dsh-onebot] mounted' + mountDetails)
     // QQ 平台说明与 qq_* 工具现按会话 agent 注入（见 ChatBridge.installChannelScope）
     return async () => {
-      await injectChannel?.stop()
       await bridge.stop()
       await connection.stop()
     }

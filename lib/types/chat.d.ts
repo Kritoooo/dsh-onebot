@@ -101,7 +101,10 @@ export declare function sanitizeNickname(nickname: string): string;
  * @param role - the sender's tier (权限分档 A1): admin → ·管理员, member → ·成员.
  * @returns the prefix string (never empty: always at least the time stamp).
  */
-export declare function buildGroupMessagePrefix(nickname: string, userId: string, mentioned: boolean, role: UserRole): string;
+export declare function buildGroupMessagePrefix(nickname: string, userId: string, mentioned: boolean, role: UserRole, seconds?: number): string;
+/** OneBot Unix seconds, with missing/invalid/out-of-range times falling back to now. */
+export declare function formatClock(seconds: number): string;
+export declare function buildDirectMessagePrefix(seconds: number): string;
 /** Soft-cap prefix for restricted (member-role) group users. */
 export declare const RESTRICTED_PREFIX = "[\u53D7\u9650\u7528\u6237:\u4EC5\u95EE\u7B54] ";
 /**
@@ -119,4 +122,4 @@ export declare const RESTRICTED_PREFIX = "[\u53D7\u9650\u7528\u6237:\u4EC5\u95EE
  * @param nickname - the sender display name (sanitized again defensively).
  * @returns the boundary-wrapped content.
  */
-export declare function wrapUserMessage(content: string, userId: string, nickname: string): string;
+export declare function wrapUserMessage(content: string, userId: string, nickname: string, messageId?: string): string;

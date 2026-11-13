@@ -74,5 +74,11 @@ fi
 echo "=== Compiling src → lib (tsc $("$TSC" --version), dsh install: $NODE_MODULES) ==="
 "$TSC" -p tsconfig.json
 
+# Browser source is maintained separately from generated TypeScript output.
+cp "$ROOT/client/index.js" "$ROOT/lib/client.js"
+for obsolete in ask-tool ask-foreground card-relay question-answer record inject replay; do
+  rm -f "$ROOT/lib/$obsolete.js" "$ROOT/lib/types/$obsolete.d.ts"
+done
+
 echo "=== Build complete ==="
 ls -la lib/ lib/types/

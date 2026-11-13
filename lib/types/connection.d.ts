@@ -75,6 +75,8 @@ export declare class OneBotConnection {
     onMessage: (event: OneBotEvent) => void;
     /** Meta event handler (self_id learning). */
     onMeta: (event: OneBotEvent) => void;
+    /** Supported notice events (currently poke only). */
+    onNotice: (event: OneBotEvent) => void;
     /** Connection-state callback. */
     onStatus: (connected: boolean) => void;
     /**

@@ -65,6 +65,8 @@ export interface ConnectionConfig {
 const RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
 const MAX_RECONNECT_ATTEMPTS = 100
 const HEARTBEAT_MS = 30_000
+// Some OneBot peers disconnect on WS ping; probe through the OneBot API.
+const HEARTBEAT_ECHO = 'dsh-onebot-heartbeat'
 /**
  * Per-frame byte cap for both directions. ws defaults to 100MiB, letting a
  * token holder pin memory with a single giant frame. 64MiB keeps ample
@@ -134,6 +136,8 @@ export class OneBotConnection {
   onMessage: (event: OneBotEvent) => void = () => undefined
   /** Meta event handler (self_id learning). */
   onMeta: (event: OneBotEvent) => void = () => undefined
+  /** Supported notice events (currently poke only). */
+  onNotice: (event: OneBotEvent) => void = () => undefined
   /** Connection-state callback. */
   onStatus: (connected: boolean) => void = () => undefined
   /**
@@ -478,7 +482,11 @@ export class OneBotConnection {
       this.setConnected(true)
       this.startHeartbeat()
     })
-    socket.on('message', data => this.onFrame(data))
+    socket.on('message', data => {
+      if (this.socket !== socket) return
+      this.lastPongAt = Date.now()
+      this.onFrame(data)
+    })
     socket.on('pong', () => {
       if (this.socket !== socket) return // stale socket: a newer dial owns the timestamps
       this.lastPongAt = Date.now()
@@ -567,7 +575,11 @@ export class OneBotConnection {
     const previous = this.socket
     this.socket = socket
     this.lastPongAt = Date.now()
-    socket.on('message', data => this.onFrame(data))
+    socket.on('message', data => {
+      if (this.socket !== socket) return
+      this.lastPongAt = Date.now()
+      this.onFrame(data)
+    })
     socket.on('pong', () => {
       if (this.socket !== socket) return // stale socket: a newer dial-in owns the timestamps
       this.lastPongAt = Date.now()
@@ -603,12 +615,12 @@ export class OneBotConnection {
       if (socket.readyState !== WebSocket.OPEN) return
       const now = Date.now()
       if (now - this.lastPongAt >= 2 * HEARTBEAT_MS) {
-        this.log('warn', 'heartbeat timeout: no pong for ' + (now - this.lastPongAt) + 'ms (mode=' + this.config.mode + '); terminating socket')
+        this.log('warn', '心跳超时：' + (now - this.lastPongAt) + 'ms 未收到回帧 (mode=' + this.config.mode + ')，断开连接')
         socket.terminate()
         return
       }
       try {
-        socket.ping()
+        socket.send(JSON.stringify({ action: 'get_status', echo: HEARTBEAT_ECHO }))
       } catch {
         // socket may be closing
       }
@@ -688,7 +700,17 @@ export class OneBotConnection {
         }
         return
       }
-      // notice / request events are intentionally ignored (v1).
+      if (event.post_type === 'notice') {
+        if (event.notice_type === 'poke' || (event.notice_type === 'notify' && event.sub_type === 'poke')) {
+          try {
+            this.onNotice(event)
+          } catch (error) {
+            this.log('error', '戳一戳事件处理失败: ' + describeError(error) + errorStack(error))
+          }
+        }
+        return
+      }
+      // Other notices and request events remain ignored.
     }
   }
 }

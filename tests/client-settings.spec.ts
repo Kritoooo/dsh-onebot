@@ -5,7 +5,7 @@
  * window.__ModuleLoader__）的模块级契约：
  *   ① 语法可解析（new Function）+ CJS banner/footer 形态 + externals 仅 react；
  *   ② 入口导出 inject + apply；
- *   ③ 四组 29 键：分组/键集/默认值与宿主侧 src/settings-remote.js（T3 + W6 扩展
+ *   ③ 四组 25 键：分组/键集/默认值与宿主侧 src/settings-remote.js（T3 + W6 扩展
  *      + W7 workspacePath + T2 newMessagePolicy + T9 autoSteerPolicy）导出常量逐字一致（descriptor 契约核对，防两侧漂移）；
  *      诊断组 6 键文案为中文标签 + 一句话「关掉会怎样」+ 配置键名（W6）；
  *   ④ Typert descriptor 与 T3 服务方法面逐字对齐：getSettings() /
@@ -159,7 +159,7 @@ describe('T4 客户端 bundle — descriptor 契约核对（与 T3 src/settings-
     expect(() => getSettings.result.schema.parse({ revision: 0, entryActive: true, config: SCHEMA_DEFAULTS, secrets: [], groups: SETTINGS_GROUPS, effect: 'none' })).toThrow()
   })
 
-  it('updateSettings patch codec 接受 29 键任意子集、拒绝非法枚举值', () => {
+  it('updateSettings patch codec 接受 25 键任意子集、拒绝非法枚举值', () => {
     const updateSettings = descriptors[1] as { parameters: Array<{ codec: { schema: { parse(value: unknown): unknown } } }> }
     const patchCodec = updateSettings.parameters[0].codec.schema
     expect(patchCodec.parse({ port: 1234 })).toEqual({ port: 1234 })
@@ -169,12 +169,12 @@ describe('T4 客户端 bundle — descriptor 契约核对（与 T3 src/settings-
   })
 })
 
-describe('T4 客户端 bundle — 四组 29 键（分组/键集/默认值 = T1 §4 表 + W6 诊断组 + W7 workspacePath + T2 newMessagePolicy + T9 autoSteerPolicy + T3 deferredTimeoutMs = T3 常量）', () => {
+describe('T4 客户端 bundle — 四组 25 键（分组/键集/默认值 = T1 §4 表 + W6 诊断组 + W7 workspacePath + T2 newMessagePolicy + T9 autoSteerPolicy + T3 deferredTimeoutMs = T3 常量）', () => {
   it('分组与键序逐字对齐 host SETTINGS_GROUPS', () => {
     expect(client.GROUP_KEYS).toEqual(SETTINGS_GROUPS)
     expect(groups.map((group) => group.id)).toEqual(['connection', 'permissions', 'behavior', 'diagnostics'])
     expect(allFields.map((field) => field.key).sort()).toEqual([...ALL_KEYS].sort())
-    expect(allFields).toHaveLength(29) // T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(allFields).toHaveLength(25) // T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
   })
 
   it('默认值逐字对齐 host SCHEMA_DEFAULTS（重置按钮唯一来源）', () => {
@@ -232,7 +232,7 @@ describe('T4 客户端 bundle — 渲染函数模块级可测（renderGroup 纯�
     const titles = sections.map((section) => ((section.children[0] as StubElement).children[0] as string))
     expect(titles).toEqual(['连接', '权限', '行为', '诊断'])
     const fieldRows = sections.flatMap((section) => walk(section).filter((element) => element.type === 'div' && element.props.className === 'obx-field'))
-    expect(fieldRows).toHaveLength(29)
+    expect(fieldRows).toHaveLength(25)
   })
 
   it('控件类型齐备：4 枚举下拉 + 3 多行文本 + 11 布尔勾选 + 5 文本框 + 1 密码框（secret 另含清除勾选）', () => {
@@ -242,7 +242,7 @@ describe('T4 客户端 bundle — 渲染函数模块级可测（renderGroup 纯�
     const textareas = elements.filter((element) => element.type === 'textarea')
     expect(selects).toHaveLength(6) // 5 原有枚举（mode/dmPolicy/groupPolicy/unknownCommand/newMessagePolicy）+ T9 autoSteerPolicy
     expect(textareas).toHaveLength(3)
-    expect(inputs.filter((input) => input.props.type === 'checkbox')).toHaveLength(11 + 1) // 11 布尔（5 原有 + 6 W6）+ secret 清除勾选
+    expect(inputs.filter((input) => input.props.type === 'checkbox')).toHaveLength(7 + 1) // 7 retained booleans + clear-secret checkbox
     expect(inputs.filter((input) => input.props.type === 'text')).toHaveLength(8) // host/port/url/botQQ/workspacePath（W7）+ interimRecallMs/rateLimitPerMinute + T3 deferredTimeoutMs（number 以文本框渲染）
     expect(inputs.filter((input) => input.props.type === 'password')).toHaveLength(1)
   })
@@ -276,7 +276,7 @@ describe('T4 客户端 bundle — 保存语义（updateSettings(patch, expectedR
     opts?: { secretDraft?: string; clearSecret?: boolean },
   ) => { patch: Record<string, unknown>; invalidKeys: string[] }
 
-  it('仅下发与生效值有差异的键（29 键任意子集）', () => {
+  it('仅下发与生效值有差异的键（25 键任意子集）', () => {
     const values = draft({ config: SCHEMA_DEFAULTS })
     values.port = '9999'
     values.mode = 'forward'
@@ -317,9 +317,9 @@ describe('T4 客户端 bundle — 保存语义（updateSettings(patch, expectedR
   })
 })
 
-describe('W6 诊断组 — 6 个观测/调试布尔键的文案契约（中文标签 + 关掉会怎样 + 配置键名）', () => {
+describe('W6 诊断组 — 2 个观测布尔键的文案契约（中文标签 + 关掉会怎样 + 配置键名）', () => {
   const diagnosticsGroup = groups.find((group) => group.id === 'diagnostics')!
-  const NEW_KEYS = ['actionAuditEnabled', 'traceEnabled', 'recordInbound', 'inboxRedact', 'injectEnabled', 'injectDryRun']
+  const NEW_KEYS = ['actionAuditEnabled', 'traceEnabled', ]
 
   it('诊断组键集与键序逐字对齐 host SETTINGS_GROUPS.diagnostics', () => {
     expect(diagnosticsGroup.fields.map((field) => field.key)).toEqual(NEW_KEYS)
@@ -337,18 +337,13 @@ describe('W6 诊断组 — 6 个观测/调试布尔键的文案契约（中文�
     expect(diagnosticsGroup.fields.map((field) => field.label)).toEqual([
       '主动写审计',
       '决策追踪（trace）',
-      '入站事件录制',
-      '录制脱敏',
-      '事件注入（仅调试）',
-      '注入 dry-run',
     ])
   })
 
-  it('诊断组默认值与 host SCHEMA_DEFAULTS 一致（actionAuditEnabled/injectDryRun 开，其余关）', () => {
+  it('诊断组默认值与 host SCHEMA_DEFAULTS 一致（actionAuditEnabled 开，其余关）', () => {
     const defaults = client.DEFAULTS as Record<string, unknown>
     expect(defaults.actionAuditEnabled).toBe(true)
-    expect(defaults.injectDryRun).toBe(true)
-    for (const key of ['traceEnabled', 'recordInbound', 'inboxRedact', 'injectEnabled']) {
+    for (const key of ['traceEnabled', ]) {
       expect(defaults[key]).toBe(false)
     }
     expect(client.DEFAULTS).toEqual(SCHEMA_DEFAULTS) // 整表逐字一致（含 6 新键）
@@ -357,12 +352,12 @@ describe('W6 诊断组 — 6 个观测/调试布尔键的文案契约（中文�
   it('诊断组渲染为 6 个布尔勾选行；patchCodec 接受 6 新键、拒绝非布尔', () => {
     const values = draft({ config: SCHEMA_DEFAULTS }) as Record<string, unknown>
     values.traceEnabled = true
-    values.injectEnabled = true
+    values.actionAuditEnabled = false
     const compute = client.computePatch as (draftValues: Record<string, unknown>, config: Record<string, unknown>) => { patch: Record<string, unknown> }
-    expect(compute(values, SCHEMA_DEFAULTS).patch).toEqual({ traceEnabled: true, injectEnabled: true })
+    expect(compute(values, SCHEMA_DEFAULTS).patch).toEqual({ traceEnabled: true, actionAuditEnabled: false })
     const updateSettings = descriptors[1] as { parameters: Array<{ codec: { schema: { parse(value: unknown): unknown } } }> }
     const patchCodec = updateSettings.parameters[0].codec.schema
-    expect(patchCodec.parse({ actionAuditEnabled: false, injectDryRun: false })).toEqual({ actionAuditEnabled: false, injectDryRun: false })
+    expect(patchCodec.parse({ actionAuditEnabled: false, traceEnabled: true })).toEqual({ actionAuditEnabled: false, traceEnabled: true })
     expect(() => patchCodec.parse({ traceEnabled: 'yes' })).toThrow()
   })
 })
@@ -387,7 +382,7 @@ describe('W6 「非默认」徽标 — 快照生效值 vs schema 默认值（纯
     expect(traceBadges).toHaveLength(1)
     expect(JSON.stringify(traceBadges[0])).toContain('非默认')
     // 多键命中逐键标注
-    expect(badges(draftValues, ['traceEnabled', 'injectEnabled', 'port'])).toHaveLength(3)
+    expect(badges(draftValues, ['traceEnabled', 'actionAuditEnabled', 'port'])).toHaveLength(3)
   })
 
   it('徽标数据源是快照生效值（DEFAULTS 对照）：默认快照无任何徽标，改值后对应键出现徽标', () => {
@@ -427,13 +422,13 @@ describe('W6 失败守卫（客户端侧）— host edit-failed 中文错误可�
     expect(isConflictError({ code: 'onebot-settings/conflict', message: 'expectedRevision mismatch' })).toBe(true)
   })
 
-  it('host patch 白名单 29 键与 client patchSchema 同宽：新键可下发（契约同步核对）', () => {
+  it('host patch 白名单 25 键与 client patchSchema 同宽：新键可下发（契约同步核对）', () => {
     const updateSettings = descriptors[1] as { parameters: Array<{ codec: { schema: { parse(value: unknown): unknown } } }> }
     const patch = updateSettings.parameters[0].codec.schema.parse({
-      actionAuditEnabled: true, traceEnabled: false, recordInbound: true, inboxRedact: false, injectEnabled: false, injectDryRun: true,
+      actionAuditEnabled: true, traceEnabled: false,
     })
     expect(patch).toEqual({
-      actionAuditEnabled: true, traceEnabled: false, recordInbound: true, inboxRedact: false, injectEnabled: false, injectDryRun: true,
+      actionAuditEnabled: true, traceEnabled: false,
     })
   })
 })
@@ -614,12 +609,12 @@ describe('T5 批 2 — 诊断组 details/summary 折叠渲染（UX §3.1：colla
   it('缺省（无 collapsible）保持 section>h3 既有形态；组描述行渲染在标题后', () => {
     const section = renderWith({})
     expect(section.type).toBe('section')
-    expect(walk(section).filter((element) => element.props.className === 'obx-field')).toHaveLength(6)
+    expect(walk(section).filter((element) => element.props.className === 'obx-field')).toHaveLength(2)
     expect(JSON.stringify(section)).toContain('观测与调试开关')
   })
 
   it('collapsible 时 details>summary（aria-expanded/controls、open 受控）+ summary meta + 脏标记，字段行不减少', () => {
-    const collapsed = renderWith({ collapsible: { open: false, summaryMeta: '6 项 · 2 项默认开' } })
+    const collapsed = renderWith({ collapsible: { open: false, summaryMeta: '2 项 · 1 项默认开' } })
     expect(collapsed.type).toBe('details')
     expect(collapsed.props['data-group']).toBe('diagnostics')
     expect(collapsed.props.open).toBe(false)
@@ -629,11 +624,11 @@ describe('T5 批 2 — 诊断组 details/summary 折叠渲染（UX §3.1：colla
     expect(summary.props['aria-expanded']).toBe(false)
     expect(String(summary.props['aria-controls'])).toContain('diagnostics')
     expect(JSON.stringify(summary)).toContain('诊断')
-    expect(JSON.stringify(summary)).toContain('6 项 · 2 项默认开')
+    expect(JSON.stringify(summary)).toContain('2 项 · 1 项默认开')
     expect(JSON.stringify(summary)).not.toContain('含未保存修改') // 无脏改动不打标记
-    expect(walk(collapsed).filter((element) => element.props.className === 'obx-field')).toHaveLength(6)
+    expect(walk(collapsed).filter((element) => element.props.className === 'obx-field')).toHaveLength(2)
     // 展开 + 含脏改动：aria-expanded 翻转 + 「● 含未保存修改」标记
-    const expanded = renderWith({ collapsible: { open: true, summaryMeta: '6 项 · 2 项默认开', dirtyMark: '● 含未保存修改' } })
+    const expanded = renderWith({ collapsible: { open: true, summaryMeta: '2 项 · 1 项默认开', dirtyMark: '● 含未保存修改' } })
     const summary2 = expanded.children[0] as StubElement
     expect(summary2.props['aria-expanded']).toBe(true)
     expect(JSON.stringify(summary2)).toContain('● 含未保存修改')

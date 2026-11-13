@@ -811,99 +811,6 @@ describe('ChatRegistry', () => {
     await connection.stop()
   })
 
-  it('restores the /workspace override from a resumed session cwd (方案 B)', async () => {
-    const ctx = new Context()
-    const sessions = { flush: vi.fn(async () => undefined) }
-    const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-test-'))
-    const otherDir = mkdtempSync(join(tmpdir(), 'onebot-other-'))
-    await writeFile(join(mediaDir, 'chat-sessions.json'), JSON.stringify({ 'private:10001': 'onebot-private-10001-aabbcc' }), 'utf8')
-    const resume = vi.fn(async () => ({
-      agent: {
-        session: { id: 'onebot-private-10001-aabbcc', seq: 1, header: { cwd: otherDir } },
-        status: 'idle',
-        cancel: () => undefined,
-        followup: () => undefined,
-        whenIdle: async () => undefined,
-      },
-      dispose: async () => undefined,
-    }))
-    const agents = { create: vi.fn(), resume } as never
-    const connection = new OneBotConnection({
-      mode: 'reverse', host: '127.0.0.1', port: 0, url: 'ws://127.0.0.1:3001', accessToken: 'test-token', callTimeoutMs: 3_000,
-    })
-    const bridge = new ChatBridge({
-      ctx,
-      connection,
-      media: new MediaStore(join(mediaDir, 'media'), 6),
-      transcriber: new Transcriber({ enabled: false, engine: 'auto', command: '', args: [], model: 'small', timeoutMs: 10_000 }),
-      agents,
-      sessions: sessions as never,
-      agentPresets: undefined as never,
-      workspaceRegistry: undefined as never,
-      agentDefaultModel: undefined,
-      defaultModel: undefined,
-      config: {
-        botQQ: '10002', ignoreSelf: false, requireMention: true,
-        interimMessages: true, sendErrorNotice: true, restrictedMemberPrefix: false,
-        sensitivePatterns: [], mediaDir, maxImageBytes: 8 * 1024 * 1024,
-        maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
-        textImageThreshold: 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],
-        agentPreset: 'standard', workspacePath: mediaDir,
-      },
-      policy: {
-        dmPolicy: 'open', groupPolicy: 'open', allowFrom: [], groupAllowFrom: [],
-        adminUsers: ['10001'], allowAllUsers: false, requireMention: true,
-      },
-      log: () => undefined,
-    })
-    bridge.start()
-    const override = (): string | undefined => registryOf({ bridge }).getSettings('private:10001').workspacePath
-    // Resume carried a non-default cwd → the override must be restored.
-    await vi.waitFor(() => expect(override()).toBe(otherDir))
-    // A resumed QQ chat with no inbound caller yet has no owner → file edits denied.
-    expect(bridge.canEditFiles('onebot-private-10001-aabbcc')).toBe(false)
-    // A chat whose session cwd equals the configured default must NOT get an override.
-    const { realpathSync } = await import('node:fs')
-    await writeFile(join(mediaDir, 'chat-sessions.json'), JSON.stringify({ 'private:10001': 'onebot-private-10001-zzzz' }), 'utf8')
-    const bridge2Dir = mkdtempSync(join(tmpdir(), 'onebot-test-'))
-    await writeFile(join(bridge2Dir, 'chat-sessions.json'), JSON.stringify({ 'private:10002': 'onebot-private-10002-zzzz' }), 'utf8')
-    const resume2 = vi.fn(async () => ({
-      agent: { session: { id: 'onebot-private-10002-zzzz', seq: 1, header: { cwd: realpathSync(bridge2Dir) } }, status: 'idle', cancel: () => undefined, followup: () => undefined, whenIdle: async () => undefined },
-      dispose: async () => undefined,
-    }))
-    const ctx2 = new Context()
-    const bridge2 = new ChatBridge({
-      ctx: ctx2,
-      connection: new OneBotConnection({ mode: 'reverse', host: '127.0.0.1', port: 0, url: 'ws://127.0.0.1:3002', accessToken: 'test-token', callTimeoutMs: 3_000 }),
-      media: new MediaStore(join(bridge2Dir, 'media'), 6),
-      transcriber: new Transcriber({ enabled: false, engine: 'auto', command: '', args: [], model: 'small', timeoutMs: 10_000 }),
-      agents: { create: vi.fn(), resume: resume2 } as never,
-      sessions: { flush: vi.fn(async () => undefined) } as never,
-      agentPresets: undefined as never,
-      workspaceRegistry: undefined as never,
-      agentDefaultModel: undefined,
-      defaultModel: undefined,
-      config: {
-        botQQ: '10002', ignoreSelf: false, requireMention: true,
-        interimMessages: true, sendErrorNotice: true, restrictedMemberPrefix: false,
-        sensitivePatterns: [], mediaDir: bridge2Dir, maxImageBytes: 8 * 1024 * 1024,
-        maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
-        textImageThreshold: 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],
-        agentPreset: 'standard', workspacePath: realpathSync(bridge2Dir),
-      },
-      policy: {
-        dmPolicy: 'open', groupPolicy: 'open', allowFrom: [], groupAllowFrom: [],
-        adminUsers: ['10001'], allowAllUsers: false, requireMention: true,
-      },
-      log: () => undefined,
-    })
-    bridge2.start()
-    await vi.waitFor(() => expect(registryOf({ bridge: bridge2 }).getSettings('private:10002').workspacePath).toBeUndefined())
-    await bridge.stop()
-    await bridge2.stop()
-    await connection.stop()
-  })
-
   it('drops queued turn roles on /new so the fresh session cannot inherit them (M1-A2)', async () => {
     const h = await makeCmdHarness()
     // Member turn + admin interjection: the admin role is still queued when
@@ -1034,38 +941,6 @@ describe('ChatRegistry', () => {
     await h.bridge.stop()
     await h.connection.stop()
   }, 30_000)
-
-  it('per-chat settings survive /new: workspace, preset, mode, goal, last image and pending ref (D1-PR3)', async () => {
-    const h = await makeCmdHarness()
-    const registry = registryOf(h)
-    const settings = (): ChatSettings => registry.getSettings('private:10001')
-    registry.getSettings('private:10001').workspacePath = '/ws/dir'
-    registry.getSettings('private:10001').presetOverride = 'minimal'
-    registry.getSettings('private:10001').interimOverride = false
-    registry.getSettings('private:10001').goal = '把事情做好'
-    registry.getSettings('private:10001').lastImagePath = '/media/a.png'
-    registry.getSettings('private:10001').pendingImageRef = { kind: 'image', url: 'http://x/a.jpg' }
-    h.sendText('/new')
-    await vi.waitFor(() => expect(h.outbound.some(f => JSON.stringify(f.params).includes('已开启新会话'))).toBe(true))
-    // /new retires the session but never clears the settings entry — every
-    // field keeps its value for the NEXT session of this chat (pre-PR3 maps
-    // semantics, kept verbatim).
-    expect(settings().workspacePath).toBe('/ws/dir')
-    expect(settings().presetOverride).toBe('minimal')
-    expect(settings().interimOverride).toBe(false)
-    expect(settings().goal).toBe('把事情做好')
-    expect(settings().lastImagePath).toBe('/media/a.png')
-    expect(settings().pendingImageRef).toEqual({ kind: 'image', url: 'http://x/a.jpg' })
-    // takePendingImageRef consumes exactly once.
-    expect(settings().pendingImageRef).toBeDefined()
-    const taken = registry.getSettings('private:10001').pendingImageRef
-    registry.getSettings('private:10001').pendingImageRef = undefined
-    expect(taken).toEqual({ kind: 'image', url: 'http://x/a.jpg' })
-
-    h.client.close()
-    await h.bridge.stop()
-    await h.connection.stop()
-  })
 
   // B8a (M2-T0 todo unblocked): concurrent first messages for one chat join a
   // single in-flight create — agents.create runs exactly once and the second
@@ -1214,41 +1089,6 @@ describe('ChatRegistry · T4 #15 loadMapping corrupt-mapping handling', () => {
   })
 })
 
-describe('ChatRegistry · T4 #15 /session broken-session count rendering', () => {
-  /** Minimal CommandContext for the /session empty-list branch (only the
-   * fields that path reads; the rest is never touched). */
-  function sessionCtx(brokenCount: number | undefined): { ctx: import('../src/commands.js').CommandContext; sent: string[] } {
-    const sent: string[] = []
-    const ctx = {
-      sendToChat: async (_chatId: string, text: string) => { sent.push(text); return [] },
-      log: () => undefined,
-      isAdmin: () => true,
-      getChat: () => undefined,
-      hasChat: () => false,
-      switchableSessions: () => [],
-      sessionIdFromMapping: async () => 'onebot-private-10001-dead',
-      ...(brokenCount !== undefined ? { brokenSessionCount: () => brokenCount } : {}),
-    } as unknown as import('../src/commands.js').CommandContext
-    return { ctx, sent }
-  }
-
-  it('the empty /session list appends the broken count line when the retire record is non-empty', async () => {
-    const { ctx, sent } = sessionCtx(1)
-    await expect(tryHandleCommand(ctx, 'private:10001', '/session', '10001')).resolves.toBe(true)
-    expect(sent).toHaveLength(1)
-    expect(sent[0]).toContain('1 个损坏会话已隔离（不可切回）')
-  })
-
-  it('no broken sessions (or a pre-wiring context without the accessor) renders the old output', async () => {
-    for (const brokenCount of [0, undefined]) {
-      const { ctx, sent } = sessionCtx(brokenCount)
-      await expect(tryHandleCommand(ctx, 'private:10001', '/session', '10001')).resolves.toBe(true)
-      expect(sent).toHaveLength(1)
-      expect(sent[0]).not.toContain('损坏会话')
-    }
-  })
-})
-
 /**
  * 权限分档 A3: 群聊粗档 preset——resolvePresetId 在群聊 chat 上优先使用
  * config.agentPresetGroup（未配置/空串 = 现行为，群私同源 agentPreset）；
@@ -1270,14 +1110,6 @@ describe('ChatRegistry.resolvePresetId agentPresetGroup (权限分档 A3)', () =
     }))
     await expect(registry.resolvePresetId('group:20001')).resolves.toBe('standard')
     await expect(registry.resolvePresetId('private:10001')).resolves.toBe('standard')
-  })
-
-  it('a /preset override still wins over agentPresetGroup', async () => {
-    const registry = new ChatRegistry(makeRegistryDeps({
-      config: { agentPreset: 'standard', agentPresetGroup: 'group-basic' },
-    }))
-    registry.getSettings('group:20001').presetOverride = 'minimal'
-    await expect(registry.resolvePresetId('group:20001')).resolves.toBe('minimal')
   })
 
   it('falls back to the deployment default when neither tier preset is set', async () => {

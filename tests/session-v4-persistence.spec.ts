@@ -215,31 +215,6 @@ describe('session v4 producer-owned source kind（持久化回归）', () => {
     } finally { await stopHarness(h) }
   })
 
-  it('④ 宿主转发命令（/permission、/plan）：插件侧零会话写入', async () => {
-    const execute = vi.fn(async (_agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal) => {
-      expect(Array.isArray(attachments)).toBe(true)
-      expect(signal.aborted).toBe(false)
-      return { commandId: 'cmd-host', result: { kind: 'success', text: 'current preset: workspace-write\n(available: workspace-write, danger-full-access)' } }
-    })
-    const h = await makeV4Harness({ commands: { execute } })
-    try {
-      h.sendText('先建立会话')
-      await vi.waitFor(() => expect(h.captured).toHaveLength(1))
-      h.captured.length = 0 // 只观测命令路径
-
-      h.sendText('/permission')
-      await vi.waitFor(() => expect(execute).toHaveBeenCalledWith(expect.anything(), '/permission', expect.anything(), expect.anything()))
-      await vi.waitFor(() => {
-        expect(h.outbound.some(f => f.action === 'send_msg')).toBe(true)
-      })
-      h.sendText('/plan off')
-      await vi.waitFor(() => expect(execute).toHaveBeenCalledWith(expect.anything(), '/plan off', expect.anything(), expect.anything()))
-      // 宿主转发路径：commands.execute(chat.agent, …) 由宿主命令运行时写行（宿主自有
-      // source）；插件侧 followup/steer 均未被触发 —— 零插件会话写入。
-      expect(h.captured).toHaveLength(0)
-    } finally { await stopHarness(h) }
-  })
-
   it('⑤ 持久化-重读-再写入循环：kind 不漂移；宿主 v4 准入正反例成立', async () => {
     const h = await makeV4Harness()
     try {

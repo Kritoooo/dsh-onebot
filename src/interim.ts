@@ -89,8 +89,6 @@ export interface InterimContext {
   /** The chat's outbound send-chain tail (settleLoop drains it before
    * snapshotting the interim trail). */
   chainTail(chatId: ChatId): Promise<unknown>
-  /** Host-plane card relay (assistant/message branch, before any early return). */
-  relayHostCards(chatId: ChatId, content: readonly unknown[]): void
   /** Per-chat effective outbound mode (/mode override → global config). */
   effectiveInterim(chatId: ChatId): boolean
   /** Bridge log line callback. */
@@ -163,12 +161,6 @@ export class InterimTracker {
     const messageId = message.id
     if (messageId !== undefined && chat.lastHandledMessageId === messageId) return
     if (messageId !== undefined) chat.lastHandledMessageId = messageId
-    // Host-plane cards (plan review / ask_user_question) never enter the
-    // session text stream — the model calls a tool whose arguments carry the
-    // content and whose text block is empty, so the `text === ''` early
-    // return below would otherwise leave QQ silent. Relay those cards here,
-    // before any early return, so the user is never left hanging.
-    this.ctx.relayHostCards(chatId, message.content)
     const text = message.content
       .filter(block => block.type === 'text')
       .map(block => block.text)

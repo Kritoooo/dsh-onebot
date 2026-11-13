@@ -8,7 +8,6 @@
  * @module dsh-onebot/bridge
  */
 import type { AgentRegistry, ModelSelection } from '@deepseek-ai/dsh-agent';
-import type { LlmModelInfo, LlmProviderInfo } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent, SessionId, SessionStore } from '@deepseek-ai/dsh-session';
 import type { OneBotConnection, OneBotEvent } from './connection.js';
 import type { MediaStore } from './media.js';
@@ -16,23 +15,14 @@ import type { Transcriber } from './stt.js';
 import type { ChatId } from './chat.js';
 import type { AccessPolicyConfig } from './chat.js';
 import { type NoticeTexts } from './notices.js';
-import { type UserQuestionsPort } from './ask-tool.js';
 import type { OutboundSegment, SendOptions } from './outbound.js';
 import type { TraceSink } from './trace.js';
-import type { InjectChannel } from './inject.js';
-import type { InboundRecorder } from './record.js';
 import type { TraceStage } from './trace.js';
 /** T2 (P1): the queue notice sent to a chat when a message arrives while its
  * task is running under the default 'queue' policy — at most ONE per running
  * turn (the flag resets at turn/end) so a burst of queued messages never
  * spams the chat. Exported for the deterministic text wait in tests. */
 export declare const QUEUE_NOTICE_TEXT = "\u23F3 \u5F53\u524D\u4EFB\u52A1\u8FD0\u884C\u4E2D\uFF0C\u65B0\u6D88\u606F\u5DF2\u6392\u961F\uFF0C\u5C06\u5728\u5F53\u524D\u4EFB\u52A1\u7ED3\u675F\u540E\u4F9D\u6B21\u5904\u7406\u3002";
-/** T2-B2: how long a relayed ask_user_question batch stays interceptable —
- * after this the bridge stops treating plain replies as answers (the host's
- * continued-state question may still be answered from the Web card). */
-export declare const QUESTION_TTL_MS: number;
-/** T2-B3: the auto-receipt sent when a QQ reply settles an ask_user_question batch. */
-export declare const ANSWER_ACCEPTED_NOTICE = "\u2714 \u5DF2\u63D0\u4EA4\u56DE\u7B54";
 /** Resolved runtime configuration for the bridge. */
 export interface BridgeConfig {
     botQQ: string;
@@ -120,10 +110,6 @@ export interface TraceBridgeConfig {
     /** W1: decision-trace sink; absent/disabled = no traceIds, no jsonl, zero
      * behavior difference vs 0.6.0. */
     trace?: TraceSink | undefined;
-    /** W1/T5: inbound recorder (recordInbound); absent = recording off. */
-    recorder?: InboundRecorder | undefined;
-    /** W1/T5: inject channel (injectEnabled, DEBUG-ONLY); absent = channel off. */
-    inject?: InjectChannel | undefined;
 }
 /** Agent-preset service (dsh-agent-presets): joins agents to a preset composition. */
 export interface AgentPresetsLike {
@@ -137,9 +123,6 @@ export interface AgentPresetsLike {
         id: string;
     }>;
 }
-/** Structural slice of one logged session event the /session preview reads
- * — only the preview's fields are named, and the host's SessionEvent (whose
- * 'user/message' payload is a UserMessage) satisfies it. */
 export interface SessionPreviewEvent {
     type?: string;
     data?: {
@@ -153,10 +136,6 @@ export interface SessionPreviewEvent {
         }[];
     };
 }
-/** Narrowed read handle over one stored session (dsh-session-persistence's
- * `SessionHandle` from `open(id, 'read')`): the /session preview reads the
- * immutable header plus a small event prefix and then MUST close the handle
- * (AsyncDisposable — a leaked read handle pins backend resources). */
 export interface SessionReadHandleLike {
     readonly header: {
         createdAt?: number;
@@ -193,14 +172,6 @@ export interface WorkspaceRegistryLike {
 /** Default model service (dsh-agent-default-model): read/save the default selection. */
 export interface AgentDefaultModelLike {
     currentSelection(): ModelSelection | undefined;
-    saveSelection(next: ModelSelection): Promise<void>;
-}
-/** Live model-catalog port (M2-C5b): the only llm surface the command domain
- * reads (/model). index.ts implements it over a live llm-service lookup so
- * late-registered providers stay visible; commands never touch Context. */
-export interface LlmCatalogPort {
-    listProviders(): LlmProviderInfo[];
-    listModels(provider: string): Promise<LlmModelInfo[]>;
 }
 /** Session-event feed port (M2-C5b): the narrowed event-bus surface the bridge
  * subscribes to, replacing the whole-plugin Context. index.ts satisfies it
@@ -211,8 +182,6 @@ export interface SessionEventPort {
     on(type: 'session/event', handler: (session: Session, event: SessionEvent) => void): () => void;
     on(type: 'session/flush', handler: (session: Session) => void): () => void;
 }
-/** Services the bridge needs (M2-C5b: the plugin Context enters only through
- * the two explicit ports below — session events and the /model catalog). */
 export interface BridgeDeps {
     ctx: SessionEventPort;
     /** Resolves once the host's boot-time configuration (the loader service) is
@@ -220,44 +189,16 @@ export interface BridgeDeps {
      * Absent in test assemblies = no gate (matches the previously swallowed
      * lookup). Must not reject. */
     hostReady?: (() => Promise<void>) | undefined;
-    /** Live model-catalog port for /model (M2-C5b); index.ts implements it over
-     * the live llm service. Absent only in assemblies that never route /model. */
-    llmCatalog?: LlmCatalogPort | undefined;
     connection: OneBotConnection;
-    /** The dsh data home (default <home>/.dsh); used to enumerate agent presets. */
-    dshHome?: string | undefined;
     media: MediaStore;
     transcriber: Transcriber;
     agents: AgentRegistry;
     sessions: SessionStore;
     agentPresets: AgentPresetsLike | undefined;
-    /** Host command runtime: forwards /plan and /permission so QQ reaches the
-     * native commands. dsh ≥0.1.5-rc.1: `submittedAttachments` (always pass an
-     * empty array) and `signal` are both REQUIRED (the host reads `.length` /
-     * `.aborted` unconditionally); the settled return is the
-     * `{ commandId, result: { kind, text } }` wrapper (older hosts: flat). */
-    commands?: {
-        execute(agent: unknown, line: string, submittedAttachments: readonly unknown[], signal: AbortSignal): Promise<{
-            kind?: string;
-            text?: string;
-            result?: {
-                kind?: string;
-                text?: string;
-            };
-        }>;
-    } | undefined;
-    /** Durable persistence for cold reads: the recorded preset at resume and
-     * the /session list's per-item content previews; absent = config/default
-     * fallback and preview-less list items. */
     sessionPersistence: SessionPersistenceLike | undefined;
     workspaceRegistry: WorkspaceRegistryLike | undefined;
     agentDefaultModel: AgentDefaultModelLike | undefined;
     defaultModel: (() => ModelSelection | undefined) | undefined;
-    /** T2-B3: the host userQuestions service — settles intercepted QQ replies
-     * against the chat's continued-state ask_user_question. Absent (test
-     * assemblies / unexpected hosts) = answer interception stays disabled and
-     * every reply flows into the conversation normally. */
-    userQuestions?: UserQuestionsPort | undefined;
     config: BridgeConfig & TraceBridgeConfig;
     policy: AccessPolicyConfig;
     /** W1/T5 health: the ALREADY-redacted plugin config snapshot (secrets
@@ -313,27 +254,10 @@ export declare class ChatBridge {
      * /new keeps it. Writes go through setSilentUntilImpl (memory + settings +
      * debounced save); a bare /silent clears both copies explicitly. */
     private readonly silentUntil;
-    /** W1/T5: chatId → the traceId of the chat's unsettled INJECTED round
-     * (independent of the trace sink, so the dry-run guard covers the async
-     * agent reply even with tracing off). Cleared by a real dispatch to the
-     * chat or when the chat is removed. */
-    private readonly injectRoundByChat;
     /** T2 (P1): chats that already got the QUEUE_NOTICE_TEXT for their current
      * running turn (one notice per turn; cleared at turn/end and on chat
      * removal — bounded by the chat population). */
     private readonly queueNoticeChats;
-    /** T2-B2: the chat's outstanding ask_user_question batch, keyed by chat id
-     * (memory only — a restart loses it and the model re-asks). Populated from
-     * the card relay's onQuestionCall, consumed by interceptQuestionAnswer,
-     * cleared on settle (user-question-reply event), chat removal and the TTL. */
-    private readonly activeQuestion;
-    /** T3-board: live foreground answerers keyed by callId — the
-     * 'user-questions/request' waterfall listener waits on these for the QQ
-     * answer (instant settle: the ask tool returns instead of timing out to
-     * pending). Populated by onForegroundQuestionRequest, delivered by
-     * interceptQuestionAnswer, cleared on settle, chat removal, bridge stop,
-     * and each listener's own deadline/host-signal race. */
-    private readonly foregroundWaits;
     /** Plugin version + git commit, read once for /ver. */
     private pluginVersion;
     private pluginCommit;
@@ -399,87 +323,13 @@ export declare class ChatBridge {
      * default.
      */
     private ready;
-    /**
-     * Inbound OneBot message event → agent turn. All policy and media work is
-     * contained: a failure here logs and drops the message, never the host.
-     * W1: the whole inbound chain runs inside one trace scope (ALS), so every
-     * pipeline decision point can attribute its event to this message's
-     * traceId; disabled = no scope, no id, 0.6.0 behavior. W1/T5: injected
-     * events (opts.injected) run inside their inject round (ALS) so the
-     * dry-run guard covers the whole synchronous chain, and real events are
-     * recorded by the inbound recorder when recordInbound is on (injected
-     * events are never recorded — no inject→record→replay feedback loop).
-     */
-    handleInbound(event: OneBotEvent, opts?: {
-        injected?: boolean;
-    }): Promise<void>;
-    private handleInboundOnce;
-    /** W1: mint the inbound traceId + scope and record the first (收到消息)
-     * event; undefined when tracing is off (zero overhead, zero difference).
-     * W1/T5: an injected event REUSES its inject round's traceId, so the whole
-     * injected round (pipeline decisions + intercepted outbound calls) shares
-     * one traceId in the trace stream. */
+    /** Process real OneBot messages inside the optional trace scope. */
+    handleInbound(event: OneBotEvent): Promise<void>;
     private beginInboundTrace;
     private processInbound;
-    /** Feed one user message into a chat's agent (create on demand). Records
-     * the base text for /retry, queues the initiator's turn role, and applies
-     * per-chat /goal + /plan prefixes. */
     private dispatchFollowup;
-    /** Prepend per-chat context directives (/goal reminder) to a turn's user
-     * text. Plan mode is host-owned now (/plan forwards to the host command),
-     * so the agent's own plan-mode instruction section governs planning. */
-    private prefixTurn;
     /** Per-chat outbound-mode override (/mode), falling back to the global config. */
     private effectiveInterim;
-    /** Tool calls whose host-plane UI has no QQ equivalent; relay them to the chat. */
-    private relayHostCards;
-    /** The CardRelayContext handed to the card relay (D1-PR2): the outbound
-     * send path plus the bridge log — the only capabilities the relay touches.
-     * T2-B2 adds onQuestionCall to record the outstanding batch. */
-    private get cardRelayCtx();
-    /** T2-B2: the chat's outstanding ask_user_question batch, or undefined when
-     * there is none or the TTL (QUESTION_TTL_MS) has expired (expired entries
-     * are dropped lazily — no timer needed). */
-    private activeQuestionFor;
-    /**
-     * T2-B3: intercept a plain QQ message that parses as a reply to the chat's
-     * outstanding ask_user_question batch (选项选择 / 答:前缀 / 跳过 — see
-     * question-answer.ts) and settle it through the host userQuestions service
-     * (the chat's live root agent). Runs in the inbound pipeline before the
-     * busy-turn seam. Any failure — no active batch, not an answer shape, no
-     * userQuestions service, BAD_ANSWER / REPLY_QUEUED / returned false —
-     * falls through so the message reaches the conversation normally.
-     * @param chatId - the chat the reply arrived in.
-     * @param text - raw parsed inbound text.
-     * @returns true when the message was consumed as an answer.
-     */
-    private interceptQuestionAnswer;
-    /** T1 (#27): the answer-accepted auto receipt — notices.answerAccepted
-     * resolves the text (false/'' = not sent, string = custom text). */
-    private sendAnswerNotice;
-    /** T3-board: the chat whose live root agent is `agent` (identity first,
-     * then the session id as a defensive fallback). */
-    private chatIdForAgent;
-    /** T3-board: try to settle a live foreground wait with a parsed QQ answer
-     * batch (instant settle). Only a wait whose question ids are exactly
-     * covered by the parsed answers accepts the delivery; anything else stays
-     * for the answer() (pending) path. */
-    private deliverForegroundAnswer;
-    /** T3-board: resolve-and-drop every foreground wait belonging to `chatId`;
-     * each listener sees undefined, releases its claim and falls through. */
-    private abandonForegroundWaits;
-    /**
-     * T3-board: the per-agent 'user-questions/request' waterfall listener
-     * (registered from installChannelScope). The host dispatches timed asks as
-     * `{ ...request, agent, signal: wait.signal, wait: { callId, timed: true } }`
-     * with the innermost noAnswerer (NO_PROVIDER) last; the Web forwarder is
-     * the listener registered before us, so we only see asks the Web layer did
-     * not settle. Answering = returning { answers } (vetoing next()); anything
-     * else — not timed, no callId, no matching QQ chat, attach failed, deadline
-     * reached, host wait closed, aborted — falls through via next() so the
-     * existing 300s→pending→inbound answer() path stays intact (fail-open).
-     */
-    private onForegroundQuestionRequest;
     /**
      * Slash-command router. Commands are admin-only (the Hermes member
      * slash-command block) and are matched on the first word; a leading
@@ -494,11 +344,6 @@ export declare class ChatBridge {
      * @returns true when the message was consumed by a command.
      */
     private tryHandleCommand;
-    /**
-     * The CommandContext handed to the command table (D1-PR1): exposes exactly
-     * the bridge capabilities the routed commands use, resolved live per
-     * invocation (the llm catalog especially must stay a live service lookup).
-     */
     private get commandCtx();
     /** T3-board /silent: the chat's silence-window end (in-memory read cache). */
     private getSilentUntil;
@@ -515,8 +360,6 @@ export declare class ChatBridge {
      * (images/voices/videos) and voice files are transcribed when enabled.
      */
     private buildBody;
-    /** Resolve one media ref to a text annotation with a local path. */
-    private resolveMediaRef;
     /** M3-D4c: steer a completed voice transcript into the chat's agent — the
      * running turn consumes it at its nearest step boundary; an idle agent
      * opens a turn. No live chat (dispatch dropped/never happened) drops it. */
@@ -557,18 +400,7 @@ export declare class ChatBridge {
         name: string;
         content: string;
     }>): Promise<void>;
-    /**
-     * W1/T5: the single connection-call gate every bridge pipeline
-     * (inbound/outbound/interim/typing) routes through. In inject dry-run
-     * mode, WRITE actions of an injected round are intercepted at this
-     * outbound action layer: counted, traced with the original text, resolved
-     * with the marker message id — the real OneBot connection never sees them.
-     * Attribution: (a) the synchronous chain via the inject round's ALS, (b)
-     * the async agent reply via the chat→round association (injectRoundByChat,
-     * independent of the trace sink), (c) recalls of already-intercepted sends
-     * via the marker message id (a real OneBot id is never negative).
-     */
-    private guardedConnectionCall;
+    private connectionCall;
     /** The health deps the /healthcheck command renders from (resolved live). */
     private healthDeps;
     /** /healthcheck: render the health summary. */

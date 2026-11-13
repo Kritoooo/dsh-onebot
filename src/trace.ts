@@ -70,7 +70,6 @@ export const TRACE_STAGES = {
   queue: '离线队列',
   interim: '中间消息',
   notice: '通知',
-  inject: '事件注入',
   replay: '离线回放',
   connection: '连接故障（W3/T4 参考号）',
 } as const
@@ -100,8 +99,7 @@ export const TRACE_REASONS = {
   inboundEmptyContent: '消息展开后无有效文本内容，已丢弃',
   busyTurnQueued: '任务运行中，新消息已入队等待当前回合结束',
   busyTurnSteered: '任务运行中，新消息已作为补充指令插话',
-  // T2-B3 ask_user_question QQ 桥接。
-  questionAnswered: '消息已作为问题回答结算（ask_user_question）',
+
   mediaResolveFailed: '媒体解析失败，占位符保留原文',
   nasFileTooLarge: 'QQ 文件超过大小上限，已跳过获取',
   nasFileFailed: 'QQ 文件获取失败：无可用来源',
@@ -157,11 +155,6 @@ export interface TraceScope {
   emit(stage: TraceStage, opts?: { ok?: boolean; reason?: string; ms?: number; data?: Record<string, unknown> }): void
 }
 
-/** AsyncLocalStorage propagation (pipeline-hooks.md §5 option 1): the whole
- * inbound pipeline runs inside one scope, so decision points read the trace
- * without threading a parameter through every signature. Outbound/session
- * events use the bridge's chat-level association table instead (different
- * async chain). */
 const traceStorage = new AsyncLocalStorage<TraceScope | undefined>()
 
 /** Run `fn` inside a trace scope; with no scope (disabled) this is a plain call. */

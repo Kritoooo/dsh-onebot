@@ -4,7 +4,6 @@ import type { Transcriber } from './stt.js';
 import type { OneBotSegment, MediaRef } from './cq.js';
 import type { AccessPolicyConfig, ChatId, UserRole } from './chat.js';
 import type { BridgeConfig } from './bridge.js';
-import type { ChatSettings } from './registry.js';
 /**
  * The neutral shape normalizeOneBot11 extracts from one OneBot 11 message
  * event: exactly the fields the inbound pipeline consumes, with the event
@@ -41,6 +40,8 @@ export interface NormalizedInbound {
      * sanitized; the pipeline's M3-D5 identity whitelist sanitizes it before it
      * reaches the prefix, the boundary attribute or lastNickname. */
     nickname: string;
+    /** Original OneBot Unix seconds; 0 means unavailable. */
+    time: number;
 }
 /** The get_msg fields needed to verify a reply author and expand its text. */
 export interface QuotedMessageData {
@@ -92,8 +93,6 @@ export interface InboundContext {
     policy: AccessPolicyConfig;
     /** Live chat lookup (loop-residue reset + the B7 rate-limit window). */
     getChat(chatId: ChatId): InboundChat | undefined;
-    /** Per-chat settings (recent-image registration for /ocr). */
-    getSettings(chatId: ChatId): ChatSettings;
     /** B8c: lazy idle-chat sweep before each inbound message. */
     sweepIdleChats(): Promise<void>;
     /** Media store: ref resolution, URL downloads, fresh-path writes, temp cleanup. */
@@ -130,14 +129,6 @@ export interface InboundContext {
      * media-bearing messages always queue, never steer). Optional: absent =
      * the pre-T2 pipeline (0.8.1 behavior for every message). */
     interceptBusyTurn?(chatId: ChatId, text: string, role: UserRole, nickname: string | undefined, plain: boolean): Promise<boolean>;
-    /** T2-B3: ask_user_question answer seam — invoked for every plain message
-     * after ALL gates and BEFORE interceptBusyTurn. Parses the raw text as a
-     * reply to the chat's outstanding ask_user_question batch (纯选项选择 /
-     * 答:前缀 / 跳过 — see question-answer.ts) and settles it through the host
-     * userQuestions service. Returns true when consumed as an answer; any
-     * failure (no active batch, non-answer text, settle error/REPLY_QUEUED)
-     * returns false so the message reaches the conversation normally. */
-    interceptQuestionAnswer?(chatId: ChatId, text: string): Promise<boolean>;
     /** Outbound facade (the B7 rate-limit notice). */
     sendToChat(chatId: ChatId, text: string): Promise<string[]>;
     /** Bridge log line callback. */
@@ -201,9 +192,9 @@ export declare class InboundPipeline {
      * Build the message body text: placeholders become annotated local paths
      * (images/voices/videos) and voice files are transcribed when enabled.
      */
-    buildBody(text: string, media: MediaRef[], chatId: ChatId, rememberImage?: boolean): Promise<string>;
+    buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>;
     /** Resolve one media ref to a text annotation with a local path. */
-    resolveMediaRef(ref: MediaRef, chatId: ChatId, rememberImage?: boolean): Promise<string>;
+    resolveMediaRef(ref: MediaRef, chatId: ChatId): Promise<string>;
     /** M3-D4c: transcribe in the background and deliver the labeled transcript
      * into the chat's turn (steer at the running turn's nearest step boundary,
      * or a new turn when the agent is idle). Failure keeps [语音] as final. */

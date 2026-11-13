@@ -1,5 +1,7 @@
 # tests/ — bridge.ts 五拆迁移地图（M2-T0）
 
+2026-11-13：当前 fork 为 `0.9.19-kirito.3`，已删除宿主控制命令、历史切换、结构化提问/计划卡、原始消息录制/注入/回放和独立 /ocr。当前命令见根 README；`qq-scope.spec.ts` 覆盖移除边界与旧状态兼容，`qq-delivery.spec.ts` 和 `poke.spec.ts` 覆盖本轮 QQ 接入修复。下方是历史迁移记录，其中已删除模块和用例不再代表当前功能面。
+
 > 目的：M2 把 `src/bridge.ts`（~2200 行）按已批准方案五拆 —— `commands.ts`（命令表）/ `inbound.ts`（入站管线）/ `outbound.ts`（出站管线）/ `interim.ts`（InterimTracker）/ `registry.ts`（会话注册表）+ `card-relay.ts`（卡片中继），五个 PR 顺序固定（顺序以 PM 任务书为准，本表按目标模块组织、与顺序无关）。
 > 本文件是 PR1–PR5 的**测试迁移地图**：每个 PR 搬运代码时，按下表把对应用例同步搬到目标 spec，搬运前套件必须全绿，搬运后仍全绿（基线 tag：`pre-refactor-baseline`）。
 

@@ -72,8 +72,6 @@ export interface InterimContext {
     /** The chat's outbound send-chain tail (settleLoop drains it before
      * snapshotting the interim trail). */
     chainTail(chatId: ChatId): Promise<unknown>;
-    /** Host-plane card relay (assistant/message branch, before any early return). */
-    relayHostCards(chatId: ChatId, content: readonly unknown[]): void;
     /** Per-chat effective outbound mode (/mode override → global config). */
     effectiveInterim(chatId: ChatId): boolean;
     /** Bridge log line callback. */

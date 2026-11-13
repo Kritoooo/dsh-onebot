@@ -37,7 +37,6 @@ export declare const TRACE_STAGES: {
     readonly queue: "离线队列";
     readonly interim: "中间消息";
     readonly notice: "通知";
-    readonly inject: "事件注入";
     readonly replay: "离线回放";
     readonly connection: "连接故障（W3/T4 参考号）";
 };
@@ -65,7 +64,6 @@ export declare const TRACE_REASONS: {
     readonly inboundEmptyContent: "消息展开后无有效文本内容，已丢弃";
     readonly busyTurnQueued: "任务运行中，新消息已入队等待当前回合结束";
     readonly busyTurnSteered: "任务运行中，新消息已作为补充指令插话";
-    readonly questionAnswered: "消息已作为问题回答结算（ask_user_question）";
     readonly mediaResolveFailed: "媒体解析失败，占位符保留原文";
     readonly nasFileTooLarge: "QQ 文件超过大小上限，已跳过获取";
     readonly nasFileFailed: "QQ 文件获取失败：无可用来源";

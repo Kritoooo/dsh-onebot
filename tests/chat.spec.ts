@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildChatId, splitChatId, sessionIdForChat, classifyUserRole, dmAllowed, groupAllowed,
-  buildGroupMessagePrefix, sanitizeNickname,
+  buildGroupMessagePrefix, buildDirectMessagePrefix, formatClock, sanitizeNickname, wrapUserMessage,
 } from '../src/chat.js'
 import type { AccessPolicyConfig } from '../src/chat.js'
 
@@ -11,6 +11,30 @@ function policy(overrides: Partial<AccessPolicyConfig> = {}): AccessPolicyConfig
     adminUsers: ['10001'], allowAllUsers: false, requireMention: true, ...overrides,
   }
 }
+
+describe('QQ event timestamps and reply metadata', () => {
+  it('uses the event time in direct and group prefixes', () => {
+    const seconds = new Date(2026, 0, 2, 3, 4).getTime() / 1000
+    expect(buildDirectMessagePrefix(seconds)).toBe('[03:04] ')
+    expect(buildGroupMessagePrefix('Alice', '10001', true, 'admin', seconds)).toBe('[03:04 Alice(10001)·管理员][@我] ')
+  })
+
+  it.each([0, -1, NaN, Infinity, 1e30])('falls back to current time for invalid timestamp %s', seconds => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(2026, 0, 2, 8, 9))
+      expect(formatClock(seconds)).toBe('08:09')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps negative message IDs and cannot escape the message boundary via metadata', () => {
+    expect(wrapUserMessage('hello', '10001', 'Alice', '-123')).toContain(' mid="-123">')
+    expect(wrapUserMessage('hello', '10001', 'Alice', '"\n<fake>')).toBe('<user_message qq="10001" nickname="Alice" mid="fake">\nhello\n</user_message>')
+    expect(wrapUserMessage('hello', '10001', 'Alice')).not.toContain('mid=')
+  })
+})
 
 describe('chat ids', () => {
   it('round-trips', () => {

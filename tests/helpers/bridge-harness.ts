@@ -19,8 +19,6 @@ import { ChatBridge } from '../../src/bridge.js'
 import { MediaStore } from '../../src/media.js'
 import { Transcriber } from '../../src/stt.js'
 import { TraceSink } from '../../src/trace.js'
-import { InboundRecorder } from '../../src/record.js'
-import { InjectChannel } from '../../src/inject.js'
 import type { NoticeTexts } from '../../src/notices.js'
 
 /** dsh 0.2.2 host-faithful Agent.model stub: current() returns the last
@@ -82,7 +80,6 @@ export function makeFakeAgents(
           },
           systemPrompt: { section: (s: { name: string }) => { captured.channelSections?.push(s.name); return () => undefined } },
           tools: { register: (t: { name: string }) => { captured.channelTools?.push(t.name); return () => undefined } },
-          userQuestions: { askTimed: async () => ({ answers: [] }), answer: async () => false },
         }
         await options.setup(agentCtx)
       }
@@ -108,7 +105,7 @@ export function makeFakeAgents(
         whenIdle: async () => undefined,
       }
       if (typeof options.setup === 'function') {
-        await options.setup({ on: () => () => undefined, systemPrompt: { section: () => () => undefined }, tools: { register: () => () => undefined }, userQuestions: { askTimed: async () => ({ answers: [] }), answer: async () => false } })
+        await options.setup({ on: () => () => undefined, systemPrompt: { section: () => () => undefined }, tools: { register: () => () => undefined }, })
       }
       return { agent, dispose: async () => undefined }
     }),
@@ -117,7 +114,7 @@ export function makeFakeAgents(
 }
 
 /** Full bridge + WS harness: inbound via real WebSocket, outbound captured. */
-export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void; notices?: NoticeTexts; monoFamilies?: readonly string[]; allowPrivateHosts?: boolean; respond?: Record<string, (params: Record<string, unknown>) => unknown>; userQuestions?: unknown }) {
+export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void; notices?: NoticeTexts; monoFamilies?: readonly string[]; allowPrivateHosts?: boolean; respond?: Record<string, (params: Record<string, unknown>) => unknown>; }) {
   const ctx = new Context()
   const sessionIds: string[] = []
   const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[], agentListeners: [] as Array<{ event: string; listener: (request: unknown, next: () => Promise<unknown>) => unknown }> }
@@ -138,7 +135,6 @@ export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor
     workspaceRegistry: undefined as never,
     defaultModel: undefined,
     // T2-B3: the host userQuestions service stub (absent = no interception).
-    ...(opts?.userQuestions !== undefined ? { userQuestions: opts.userQuestions } : {}),
     config: {
       botQQ: '10002', ignoreSelf: opts?.ignoreSelf ?? false, requireMention: true,
       interimMessages: opts?.interimMessages ?? true, sendErrorNotice: true, restrictedMemberPrefix: false,
@@ -157,9 +153,6 @@ export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor
       ...(opts?.monoFamilies !== undefined ? { monoFamilies: opts.monoFamilies } : {}),
       // W1: optional decision-trace sink (absent = tracing off).
       trace: opts?.trace,
-      // W1/T5: optional recorder / inject channel (absent = feature off).
-      recorder: opts?.recorder,
-      inject: opts?.inject,
     },
     policy: {
       dmPolicy: 'open', groupPolicy: 'open', allowFrom: [], groupAllowFrom: [],
@@ -213,8 +206,6 @@ export async function makeCmdHarness(opts?: {
   /** Mention gate for group messages; absent = the default true. */
   requireMention?: boolean
   agentPresets?: unknown
-  dshHome?: string
-  ocrResult?: unknown
   interimMessages?: boolean
   unknownCommand?: 'intercept' | 'passthrough'
   interimRecallMs?: number
@@ -228,12 +219,9 @@ export async function makeCmdHarness(opts?: {
   deferredTimeoutMs?: number
   /** T3 (P2): media dir override（重启恢复测试复用同一目录的注册表/映射文件）。 */
   mediaDir?: string
-  commands?: unknown
   allowAllUsers?: boolean
   agentDefaultModel?: unknown
   workspaceRegistry?: unknown
-  /** T2-B3: the host userQuestions service stub (absent = no interception). */
-  userQuestions?: unknown
   /** /session list previews: a SessionPersistenceLike stub (stat probe +
    * open read handles). Absent = the bridge sees no persistence service and
    * the list renders preview-less items. */
@@ -261,25 +249,14 @@ export async function makeCmdHarness(opts?: {
   const bridge = new ChatBridge({
     ctx,
     connection,
-    dshHome: opts?.dshHome,
     media: new MediaStore(join(mediaDir, 'media'), 6),
     transcriber: new Transcriber({ enabled: false, engine: 'auto', command: '', args: [], model: 'small', timeoutMs: 10_000 }),
     agents: agents as never,
     sessions: sessions as never,
     agentPresets: opts?.agentPresets as never,
-    commands: (opts?.commands ?? {
-      execute: vi.fn(async (_agent: unknown, _line: string, attachments: readonly unknown[], signal: AbortSignal | undefined) => {
-        // Mirror the host: execute() reads submittedAttachments.length and
-        // signal.aborted unconditionally.
-        if (!Array.isArray(attachments)) throw new Error("Cannot read properties of undefined (reading 'length')")
-        if (signal === undefined) throw new Error("Cannot read properties of undefined (reading 'aborted')")
-        return { commandId: 'cmd-test', result: { kind: 'success', text: 'Plan mode on. Use /plan off to leave.' } }
-      }),
-    }) as never,
     sessionPersistence: (opts?.sessionPersistence ?? undefined) as never,
     workspaceRegistry: (opts?.workspaceRegistry ?? undefined) as never,
     agentDefaultModel: (opts?.agentDefaultModel ?? undefined) as never,
-    ...(opts?.userQuestions !== undefined ? { userQuestions: opts.userQuestions } : {}),
     defaultModel: () => ({ provider: 'deepseek', model: 'deepseek-chat' }),
     config: {
       botQQ: '10002', ignoreSelf: false, requireMention: opts?.requireMention ?? true,
@@ -310,13 +287,6 @@ export async function makeCmdHarness(opts?: {
     },
     log: (level: string, message: string) => opts?.log?.(level, message),
   })
-  if (opts?.ocrResult !== undefined) {
-    const real = connection.call.bind(connection)
-    connection.call = (async (action: string, params: unknown) => {
-      if (action === 'ocr_image') return opts.ocrResult
-      return await real(action, params)
-    }) as never
-  }
   connection.onMessage = event => { void bridge.handleInbound(event) }
   bridge.start()
   connection.start()

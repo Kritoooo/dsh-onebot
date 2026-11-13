@@ -42,6 +42,13 @@ export function filterBlankTextSegments(segments: OutboundSegment[]): OutboundSe
   })
 }
 
+/** Strip ACP transport metadata without the upstream's broader reply rewriting. */
+export function stripAcpNoise(text: string): string {
+  return text
+    .replace(/<\/?acp\b[^>]*>/g, '')
+    .replace(/\btokens="\d+"\s+type="[^"]*"\s+time="[^"]*">?m\d+/g, '')
+}
+
 /** Options for an explicit outbound send (from tools). */
 export interface SendOptions {
   replyTo?: string
@@ -187,7 +194,7 @@ export class OutboundPipeline {
   private readonly now: () => number
   /** Per-chat FIFO of model final replies parked while disconnected; drained
    * oldest-first on reconnect (M1-B6). */
-  private readonly pendingSends = new Map<ChatId, Array<{ text: string; sentAt: number }>>()
+  private readonly pendingSends = new Map<ChatId, Array<{ text: string; sentAt: number; replyTo?: string }>>()
 
   constructor(ctx: OutboundContext, options: { now?: () => number } = {}) {
     this.ctx = ctx
@@ -212,7 +219,7 @@ export class OutboundPipeline {
           // pipeline-hooks.md #23: the park used to be silent.
           this.ctx.log('debug', '连接断开，回复已排队等待重连补发: ' + chatId)
           this.ctx.trace?.(chatId, { stage: 'queue', ok: true, reason: TRACE_REASONS.outboundQueued })
-          this.queuePendingSend(chatId, text)
+          this.queuePendingSend(chatId, text, options.replyTo)
           return []
         }
         this.ctx.trace?.(chatId, { stage: 'outbound', ok: false, reason: TRACE_REASONS.outboundNotConnected })
@@ -224,7 +231,18 @@ export class OutboundPipeline {
         this.ctx.trace?.(chatId, { stage: 'outbound', ok: true, reason: TRACE_REASONS.outboundSensitive, data: { hits: hits.slice(0, 5) } })
       }
       const ids: string[] = []
-      const { body, nodes } = extractForwardBlocks(text, '助手')
+      // Only a leading marker is a reply instruction (#57). Markers mentioned
+      // inside prose remain ordinary text; explicit replyTo always wins.
+      let bodyText = stripAcpNoise(text)
+      let replyTo = options.replyTo
+      const replyMarker = /^\s*\[\[reply:([^\]\s]+)\]\]/
+      const replyHit = replyMarker.exec(bodyText)
+      if (replyHit !== null) {
+        if (replyTo === undefined || replyTo === '') replyTo = replyHit[1]
+        bodyText = bodyText.replace(replyMarker, '').replace(/^\s+/, '')
+      }
+      const replyOptions = { ...options, replyTo }
+      const { body, nodes } = extractForwardBlocks(bodyText, '助手')
       // T9 (#2): the model may echo the <user_message> boundary that
       // wrapUserMessage injected — strip the markers before delivery so both
       // the t2i card and the plain-text branch stay clean.
@@ -252,7 +270,7 @@ export class OutboundPipeline {
           })
           const b64 = 'base64://' + png.toString('base64')
           if (b64.length <= this.ctx.config.maxImageBytes) {
-            const id = await this.sendMsg(chatId, [{ type: 'image', data: { file: b64 } }], options)
+            const id = await this.sendMsg(chatId, [{ type: 'image', data: { file: b64 } }], replyOptions)
             if (id !== undefined) ids.push(id)
             sentCard = true
           } else {
@@ -267,7 +285,7 @@ export class OutboundPipeline {
       if (!sentCard) {
         const plain = stripMarkdown(clean)
         if (plain !== '') {
-          const id = await this.sendMsg(chatId, [{ type: 'text', data: { text: plain } }], options)
+          const id = await this.sendMsg(chatId, [{ type: 'text', data: { text: plain } }], replyOptions)
           if (id !== undefined) ids.push(id)
         } else {
           // pipeline-hooks.md #30: the empty-body skip used to be silent.
@@ -282,14 +300,14 @@ export class OutboundPipeline {
 
   /** Park one queuable send for a chat while disconnected (M1-B6):
    * per-chat FIFO, capped — the oldest entry is dropped beyond the cap. */
-  private queuePendingSend(chatId: ChatId, text: string): void {
+  private queuePendingSend(chatId: ChatId, text: string, replyTo?: string): void {
     const queue = this.pendingSends.get(chatId) ?? []
     if (queue.length >= PENDING_SEND_MAX) {
       queue.shift()
       this.ctx.log('warn', 'pending send queue full for ' + chatId + ', dropped oldest')
       this.ctx.trace?.(chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.queueFull })
     }
-    queue.push({ text, sentAt: this.now() })
+    queue.push({ text, sentAt: this.now(), replyTo })
     this.pendingSends.set(chatId, queue)
   }
 
@@ -387,12 +405,12 @@ export class OutboundPipeline {
   drainPendingSends(): void {
     if (this.ctx.isStopping()) return
     const now = this.now()
-    const batch: Array<{ chatId: ChatId; text: string }> = []
+    const batch: Array<{ chatId: ChatId; text: string; replyTo?: string }> = []
     for (const [chatId, queue] of this.pendingSends) {
       this.pendingSends.delete(chatId)
       for (const item of queue) {
         if (now - item.sentAt < PENDING_SEND_TTL_MS) {
-          batch.push({ chatId, text: item.text })
+          batch.push({ chatId, text: item.text, replyTo: item.replyTo })
         } else {
           // pipeline-hooks.md #25: the TTL drop used to be silent.
           this.ctx.log('debug', '排队回复超过 5 分钟未送达，已丢弃: ' + chatId)
@@ -400,8 +418,8 @@ export class OutboundPipeline {
         }
       }
     }
-    for (const { chatId, text } of batch) {
-      void this.sendToChat(chatId, text, { queuable: true }).catch((error: unknown) => {
+    for (const { chatId, text, replyTo } of batch) {
+      void this.sendToChat(chatId, text, { queuable: true, replyTo }).catch((error: unknown) => {
         this.ctx.log('warn', 'queued resend failed: ' + describeError(error))
         this.ctx.trace?.(chatId, { stage: 'queue', ok: false, reason: '排队回复补发失败: ' + describeError(error) })
       })
@@ -471,7 +489,10 @@ export class OutboundPipeline {
     // SnowLuma rejects empty/whitespace-only text segments — strip them at
     // the single wire chokepoint (both the pipeline and the tools funnel
     // through here).
-    const filtered = filterBlankTextSegments(segments)
+    const filtered = filterBlankTextSegments(segments.map(segment => {
+      if (segment.type !== 'text' || typeof segment.data.text !== 'string') return segment
+      return { ...segment, data: { ...segment.data, text: stripAcpNoise(segment.data.text) } }
+    }))
     if (filtered.length === 0 && options.replyTo === undefined) {
       this.ctx.log('debug', '过滤空白文本段后无有效消息段，未发送: ' + chatId)
       this.ctx.trace?.(chatId, { stage: 'outbound', ok: false, reason: TRACE_REASONS.outboundEmptyText })

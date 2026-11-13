@@ -275,21 +275,17 @@ describe('onebotSettings remote — descriptor 契约（T1 §4：全 positional�
 })
 
 describe('onebotSettings remote — W6 白名单扩展（W1/W2 观测/调试 6 键）', () => {
-  const NEW_BOOLEAN_KEYS = ['actionAuditEnabled', 'traceEnabled', 'recordInbound', 'inboxRedact', 'injectEnabled', 'injectDryRun'] as const
+  const NEW_BOOLEAN_KEYS = ['actionAuditEnabled', 'traceEnabled', ] as const
   /** 期望默认值（摘自 src/index.ts schema：actionAuditEnabled/injectDryRun 默认开，其余默认关）。 */
   const NEW_DEFAULTS: Record<string, boolean> = {
     actionAuditEnabled: true,
     traceEnabled: false,
-    recordInbound: false,
-    inboxRedact: false,
-    injectEnabled: false,
-    injectDryRun: true,
   }
 
-  it('6 个新键入快照：默认值正确、落在 diagnostics 组、计入 ALL_KEYS', () => {
+  it('2 个诊断键入快照：默认值正确、落在 diagnostics 组、计入 ALL_KEYS', () => {
     const editor = new FakeConfigEditor()
     const snapshot = getSettings(editor, createRevisionState())
-    expect(ALL_KEYS).toHaveLength(29) // W6 19→25、W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(ALL_KEYS).toHaveLength(25) // W6 19→25、W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
     expect(snapshot.groups.diagnostics).toEqual([...NEW_BOOLEAN_KEYS])
     for (const key of NEW_BOOLEAN_KEYS) {
       expect(snapshot.config[key]).toBe(NEW_DEFAULTS[key])
@@ -299,13 +295,13 @@ describe('onebotSettings remote — W6 白名单扩展（W1/W2 观测/调试 6 �
   it('新键布尔写入进入覆盖行并递增 revision；与既有键混合 patch 一次写完成', async () => {
     const editor = new FakeConfigEditor()
     const state = createRevisionState()
-    const written = await updateSettings(editor, state, { traceEnabled: true, injectEnabled: true, port: 20001 })
+    const written = await updateSettings(editor, state, { traceEnabled: true, actionAuditEnabled: false, port: 20001 })
     expect(written.revision).toBe(1)
     expect(written.config.traceEnabled).toBe(true)
-    expect(written.config.injectEnabled).toBe(true)
+    expect(written.config.actionAuditEnabled).toBe(false)
     expect(editor.writeCount).toBe(1)
     expect(editor.rows[0].config.traceEnabled).toBe(true)
-    expect(editor.rows[0].config.injectEnabled).toBe(true)
+    expect(editor.rows[0].config.actionAuditEnabled).toBe(false)
   })
 
   it('新键非布尔值拒写（bad-request，edit 零调用、revision 不变）', async () => {
@@ -317,10 +313,6 @@ describe('onebotSettings remote — W6 白名单扩展（W1/W2 观测/调试 6 �
     for (const [key, value] of [
       ['actionAuditEnabled', 'yes'],
       ['traceEnabled', 1],
-      ['recordInbound', null],
-      ['inboxRedact', ['true']],
-      ['injectEnabled', 'on'],
-      ['injectDryRun', 0],
     ] as const) {
       await expect(updateSettings(editor, state, { [key]: value })).rejects.toMatchObject({ code: 'onebot-settings/bad-request' })
     }
@@ -369,21 +361,21 @@ describe('onebotSettings remote — W6 失败守卫（configEditor 失败场景�
     const baseline = getSettings(editor, state)
     editor.rollbackSimulate = true
 
-    await expect(updateSettings(editor, state, { recordInbound: true, injectDryRun: false })).rejects.toMatchObject({
+    await expect(updateSettings(editor, state, { traceEnabled: true, actionAuditEnabled: false })).rejects.toMatchObject({
       code: 'onebot-settings/edit-failed',
       message: expect.stringContaining('写入失败'),
     })
     const after = getSettings(editor, state)
     expect(after.revision).toBe(baseline.revision) // 回滚后指纹与写前一致 → 不递增
     expect(after.config).toEqual(baseline.config) // 逐键还原，无半态（新键无残留）
-    expect(editor.entry.options.config.recordInbound).toBeUndefined()
+    expect(editor.entry.options.config.traceEnabled).toBeUndefined()
   })
 })
 
 describe('onebotSettings remote — W7 workspacePath 白名单扩展（connection 组 26 键）', () => {
   it('workspacePath 入快照：默认值 \'\'、connection 组键序追加、ALL_KEYS 25→26', () => {
     const snapshot = getSettings(new FakeConfigEditor(), createRevisionState())
-    expect(ALL_KEYS).toHaveLength(29) // T2 26→27（newMessagePolicy 入 behavior 组）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(ALL_KEYS).toHaveLength(25) // T2 26→27（newMessagePolicy 入 behavior 组）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
     expect(SCHEMA_DEFAULTS.workspacePath).toBe('')
     expect(SETTINGS_GROUPS.connection).toEqual(['mode', 'host', 'port', 'url', 'accessToken', 'botQQ', 'workspacePath'])
     expect(snapshot.groups.connection).toEqual(SETTINGS_GROUPS.connection)
@@ -489,7 +481,7 @@ describe('onebotSettings remote — W7 listWorkspaces（workspace 注册表只�
 describe('onebotSettings remote — P1/T2 newMessagePolicy 白名单扩展（behavior 组 28 键）', () => {
   it('newMessagePolicy 入快照：默认 \'queue\'、behavior 组尾追加、ALL_KEYS 26→27', () => {
     const snapshot = getSettings(new FakeConfigEditor(), createRevisionState())
-    expect(ALL_KEYS).toHaveLength(29) // W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(ALL_KEYS).toHaveLength(25) // W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
     expect(SCHEMA_DEFAULTS.newMessagePolicy).toBe('queue')
     expect(SETTINGS_GROUPS.behavior).toEqual([
       'interimMessages', 'interimRecall', 'interimRecallMs', 'sendErrorNotice', 'unknownCommand', 'rateLimitPerMinute', 'newMessagePolicy', 'autoSteerPolicy', 'deferredTimeoutMs',
@@ -532,7 +524,7 @@ describe('onebotSettings remote — P1/T2 newMessagePolicy 白名单扩展（beh
 describe('onebotSettings remote — T9 autoSteerPolicy 白名单扩展（behavior 组 27→28 键，用户裁决 2026-10-12）', () => {
   it('autoSteerPolicy 入快照：默认 \'admin\'、behavior 组尾追加（newMessagePolicy 之后）、ALL_KEYS 27→28', () => {
     const snapshot = getSettings(new FakeConfigEditor(), createRevisionState())
-    expect(ALL_KEYS).toHaveLength(29) // W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(ALL_KEYS).toHaveLength(25) // W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
     expect(SCHEMA_DEFAULTS.autoSteerPolicy).toBe('admin')
     expect(SETTINGS_GROUPS.behavior).toEqual([
       'interimMessages', 'interimRecall', 'interimRecallMs', 'sendErrorNotice', 'unknownCommand', 'rateLimitPerMinute', 'newMessagePolicy', 'autoSteerPolicy', 'deferredTimeoutMs',
@@ -575,7 +567,7 @@ describe('onebotSettings remote — T9 autoSteerPolicy 白名单扩展（behavio
 describe('onebotSettings remote — T3 deferredTimeoutMs 白名单扩展（behavior 组 28→29 键）', () => {
   it('deferredTimeoutMs 入快照：默认 600000、behavior 组尾追加（autoSteerPolicy 之后）、ALL_KEYS 28→29', () => {
     const snapshot = getSettings(new FakeConfigEditor(), createRevisionState())
-    expect(ALL_KEYS).toHaveLength(29) // W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(ALL_KEYS).toHaveLength(25) // W7 25→26（workspacePath）、T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
     expect(SCHEMA_DEFAULTS.deferredTimeoutMs).toBe(600_000)
     expect(SETTINGS_GROUPS.behavior).toEqual([
       'interimMessages', 'interimRecall', 'interimRecallMs', 'sendErrorNotice', 'unknownCommand', 'rateLimitPerMinute', 'newMessagePolicy', 'autoSteerPolicy', 'deferredTimeoutMs',

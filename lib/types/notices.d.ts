@@ -1,7 +1,7 @@
 /**
  * T1 (#27): notices 配置值 → 实际发送文案的统一解析。
  *
- * 语义定稿（issue #27，对五个键统一生效）：
+ * 语义定稿（issue #27，对四个键统一生效）：
  * - `false` = 不发；
  * - `true` / 缺省 = 默认文案（各发送点既有常量，0.9.x 行为不变）；
  * - 非空 `string` = 自定义文案；
@@ -18,8 +18,6 @@ export interface NoticeTexts {
     steerAccepted?: NoticeSetting;
     /** 消息排队提示（每个运行回合至多一条）。 */
     queue?: NoticeSetting;
-    /** 问题回答回执。 */
-    answerAccepted?: NoticeSetting;
     /** 等待模型回复超时提示。 */
     deferredTimeout?: NoticeSetting;
     /** 消息太频繁频控提示（每窗口至多一条）。 */

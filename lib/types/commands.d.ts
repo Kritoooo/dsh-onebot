@@ -9,10 +9,8 @@
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { SessionId } from '@deepseek-ai/dsh-session';
 import type { OneBotConnection } from './connection.js';
-import type { MediaRef } from './cq.js';
 import { type ChatId, type UserRole } from './chat.js';
-import type { PendingSelection, SessionSwitchOutcome, SwitchableSession } from './registry.js';
-import type { AgentDefaultModelLike, AgentPresetsLike, BridgeConfig, BridgeDeps, LlmCatalogPort, SessionPersistenceLike, SessionPreviewEvent, WorkspaceRegistryLike } from './bridge.js';
+import type { AgentDefaultModelLike, BridgeConfig } from './bridge.js';
 import type { TraceStage } from './trace.js';
 import { type NoticeSetting } from './notices.js';
 /** Narrow view of a live chat the command handlers may read or mutate —
@@ -30,103 +28,34 @@ export interface CommandChatView {
         text: string;
         sentAt: number;
     }>;
+    pendingTurnRoles: UserRole[];
 }
-/** The bridge capabilities the command surface may touch. Deliberately
- * narrower than BridgeDeps: handlers get the outbound send path, the
- * per-chat state they already owned pre-split, and the few services they
- * call — never the agent registry, media store, or the policy allowlists
- * (the admin gate is answered by `isAdmin`, not by exposing `policy`). */
 export interface CommandContext {
-    /** Full outbound pipeline send (the commands' only reply path). */
     sendToChat(chatId: ChatId, text: string): Promise<string[]>;
-    /** Bridge log line callback. */
     log(level: 'info' | 'warn' | 'error' | 'debug', message: string): void;
-    /** T1 (#27): /steer 确认文案取 notices.steerAccepted（非空 string=自定义）；
-     * 缺省/true/false → 默认文案（命令确认是命令回执，不受 false 关闭影响）。 */
     notices?: {
         steerAccepted?: NoticeSetting;
     };
-    /** Router entry gate: the admin check against the policy allowlist. */
     isAdmin(userId: string): boolean;
-    /** Live chat lookup / existence probe. */
     getChat(chatId: ChatId): CommandChatView | undefined;
     hasChat(chatId: ChatId): boolean;
-    /** Registry capabilities the commands legitimately trigger. */
     resetChat(chatId: ChatId): Promise<void>;
     dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>;
-    /** T3 (P2): /stop — 显式终止该聊天的超时补发跟踪（pending 条目转
-     * cancelled，其他聊天不受影响）。无补发条目时为 no-op。 */
     stopDeferredTracking(chatId: ChatId): void;
-    /** T2 (P1): /steer — the bridge-owned steer core (agent.steer with the
-     * producer-owned source kind; the createUserMessage write point stays in
-     * bridge.ts). Returns false when the chat has no live agent. */
     steerRunningTurn(chatId: ChatId, text: string): boolean;
-    /** Per-chat state readers/writers (the pre-split private maps). */
     effectiveCwd(chatId: ChatId): string;
     sessionIdFromMapping(chatId: ChatId): Promise<string | undefined>;
     resolvePresetId(chatId: ChatId): Promise<string | undefined>;
-    setChatWorkspacePath(chatId: ChatId, path: string): void;
-    presetOverride(chatId: ChatId): string | undefined;
-    setPresetOverride(chatId: ChatId, id: string): void;
-    hasPresetOverride(chatId: ChatId): boolean;
     interimOverride(chatId: ChatId): boolean | undefined;
     setInterimOverride(chatId: ChatId, value: boolean): void;
-    goal(chatId: ChatId): string | undefined;
-    setGoal(chatId: ChatId, value: string): void;
-    deleteGoal(chatId: ChatId): void;
-    lastImagePath(chatId: ChatId): string | undefined;
-    lastImagePath(chatId: ChatId): string | undefined;
-    /** R2: per-chat pending serial-number selection snapshot (the numbered list
-     * a bare /workspace|/model|/preset|/session rendered; lazy 5-min TTL, see below). */
-    /** /session: this chat's switchable retired sessions (newest first). */
-    switchableSessions(chatId: ChatId): SwitchableSession[];
-    /** T4 (#15): broken (hard-retired) session count from the registry's
-     * retire record, surfaced by the /session list. Absent = the list omits
-     * the broken-count line (pre-T4 hosts/tests). */
-    brokenSessionCount?: (() => number) | undefined;
-    /** /session <序号>: switch the chat back to a listed session. */
-    switchSession(chatId: ChatId, targetSessionId: string): Promise<SessionSwitchOutcome>;
-    /** /session list previews: the persistence port each retired session's
-     * first user input is cold-read through (read handle + small event prefix).
-     * Absent = preview-less items. */
-    sessionPersistence: SessionPersistenceLike | undefined;
-    pendingSelection(chatId: ChatId): PendingSelection | undefined;
-    setPendingSelection(chatId: ChatId, value: PendingSelection | undefined): void;
-    /** Lazy media resolution for the /ocr pending image ref (C6a). */
-    resolveMediaRef(ref: MediaRef, chatId: ChatId): Promise<string>;
-    /** Consume the pending pre-routing image ref (get + delete, /ocr only). */
-    takePendingImageRef(chatId: ChatId): MediaRef | undefined;
-    /** Services (narrow slices of the bridge deps). */
-    /** Live model catalog for /model (M2-C5b port; index.ts wires it over the
-     * live llm service — commands never touch Context). */
-    llmCatalog: LlmCatalogPort | undefined;
-    workspaceRegistry: WorkspaceRegistryLike | undefined;
     agentDefaultModel: AgentDefaultModelLike | undefined;
-    agentPresets: AgentPresetsLike | undefined;
-    commands: BridgeDeps['commands'];
     connection: OneBotConnection;
-    dshHome: string | undefined;
-    /** W1/T5 /healthcheck: render the health summary (absent = the bridge has
-     * no health wiring — the command replies with a hint instead). */
     healthReport?: (() => Promise<string>) | undefined;
-    /** W1/T5 /healthcheck export: pack the redacted diagnostics archive,
-     * returning its path. T4 (P3): the optional trigger reference is stamped
-     * into the archive file name (absent = the bridge's latest fault reference,
-     * or a reference-free name when none was recorded). */
     exportDiagnostics?: ((triggerRef?: string) => Promise<string>) | undefined;
-    /** T4 (P3): command-plane failure reference entry (/retry dispatch throw).
-     * Mints an MF- reference through the bridge (registry + trace + structured
-     * log) and returns it for the ⚠️ notice tail. */
     reportFailure?: ((chatId: ChatId, stage: TraceStage, detail: string) => string) | undefined;
-    /** T3-board /silent: per-chat silence window — epoch-ms until which the
-     * inbound pipeline ignores NORMAL messages (undefined = not silenced, or
-     * the window already expired). T3-board persistence: the durable copy is
-     * ChatSettings.silentUntil (chat-sessions.json) — the window survives a
-     * plugin restart and /new; a bare /silent clears it explicitly. */
     silentUntil?: ((chatId: ChatId) => number | undefined) | undefined;
     setSilentUntil?: ((chatId: ChatId, untilMs: number | undefined) => void) | undefined;
-    /** The only config fields the commands read. */
-    config: Pick<BridgeConfig, 'interimMessages' | 'maxImageBytes' | 'unknownCommand'>;
+    config: Pick<BridgeConfig, 'interimMessages' | 'unknownCommand'>;
 }
 /** T9-A: the sender identity the inbound pipeline already resolved for the
  * command message — threaded through tryHandleCommand so /steer can wrap its
@@ -205,32 +134,4 @@ export declare const STEER_ACCEPTED_NOTICE = "\u2705 \u5DF2\u4F5C\u4E3A\u8865\u5
  * steer (empty argument, no live chat, or no running task). Never crashes,
  * never silently no-ops. */
 export declare const STEER_USAGE_HINT = "\u7528\u6CD5\uFF1A/steer <\u8865\u5145\u5185\u5BB9> \u2014\u2014 \u5728\u4EFB\u52A1\u8FD0\u884C\u671F\u95F4\u5411\u5F53\u524D\u4EFB\u52A1\u8FFD\u52A0\u4E00\u6761\u8865\u5145\u6307\u4EE4\uFF0C\u6A21\u578B\u4F1A\u5728\u4E0B\u4E00\u6B65\u8BFB\u53D6\uFF1B\u5F53\u524D\u6CA1\u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\uFF0C\u76F4\u63A5\u53D1\u9001\u6D88\u606F\u5373\u53EF\u5F00\u59CB\u65B0\u4EFB\u52A1\u3002";
-/** /session list-item preview bound, in code points (emoji-safe — see
- * truncatePreview). */
-export declare const SESSION_PREVIEW_MAX_CHARS = 40;
-/** Whether a logged user-message source names a real queued user prompt (the
- * message a turn claimed) rather than a synthetic agent.inject() context or a
- * goal continuation round. Direct prompts carry kind 'user'; QQ chats
- * attribute their own inbound messages to this plugin (platform-source
- * logging), so the plugin-owned kind 'plugin:dsh-onebot' — also what the v3→v4
- * converter maps this plugin's historical rows to — is the chat's real user
- * input too. */
-export declare function isRealUserMessageSource(source: {
-    kind?: string;
-} | undefined): boolean;
-/** Code-point-safe truncation (never splits a surrogate pair — the §3.1
- * emoji lesson): at most `maxLength` code points, the last one '…' when cut. */
-export declare function truncatePreview(text: string, maxLength: number): string;
-/** The one-line preview of a session's event log (events in log order):
- * the first REAL user input (queued user prompt — kind 'user', or this
- * plugin's attributed QQ message) with non-empty text; when the log has
- * none, the first user/message of ANY source with text (synthetic
- * agent.inject context / goal continuation fallback); '' when the log
- * carries no user input at all. */
-export declare function sessionPreviewFromEvents(events: readonly SessionPreviewEvent[], maxLength?: number): string;
-/** Shorten a session id for the one-line list while keeping BOTH ends: every
- * onebot id shares the `onebot-…` head, so head-only truncation (e.g. the
- * first 12 characters) would render every entry of a chat identically — the
- * unique tail must survive for the id to stay recognizable. */
-export declare function shortSessionId(id: string): string;
 export declare function packageVersion(): string | undefined;

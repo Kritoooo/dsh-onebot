@@ -19,15 +19,14 @@ import { extForInboundName } from './media.js'
 import type { Transcriber } from './stt.js'
 import { transcriptLabel } from './stt.js'
 import type { OneBotSegment, MediaRef } from './cq.js'
-import { cqUnescape, detectExplicitMention, detectMention, parseMessage, stripLeadingBotMention } from './cq.js'
+import { cqUnescape, detectExplicitMention, detectMention, parseMessage } from './cq.js'
 import type { AccessPolicyConfig, ChatId, UserRole } from './chat.js'
 import {
-  buildChatId, buildGroupMessagePrefix, classifyUserRole, dmAllowed, groupAllowed,
-  RESTRICTED_PREFIX, sanitizeNickname, splitChatId, wrapUserMessage,
+buildChatId,buildDirectMessagePrefix,buildGroupMessagePrefix,classifyUserRole,dmAllowed,groupAllowed,
+RESTRICTED_PREFIX,sanitizeNickname,splitChatId,wrapUserMessage,
 } from './chat.js'
 import type { BridgeConfig } from './bridge.js'
 import { resolveNoticeText } from './notices.js'
-import type { ChatSettings } from './registry.js'
 import { describeError } from './errors.js'
 import { currentTrace, TRACE_REASONS } from './trace.js'
 
@@ -67,6 +66,8 @@ export interface NormalizedInbound {
    * sanitized; the pipeline's M3-D5 identity whitelist sanitizes it before it
    * reaches the prefix, the boundary attribute or lastNickname. */
   nickname: string
+  /** Original OneBot Unix seconds; 0 means unavailable. */
+  time: number
 }
 
 /** The get_msg fields needed to verify a reply author and expand its text. */
@@ -116,6 +117,7 @@ export function normalizeOneBot11(event: OneBotEvent): NormalizedInbound | null 
     forwardId: parsed.forwardId,
     messageId,
     nickname,
+    time: Number(event.time) || 0,
   }
 }
 
@@ -149,8 +151,6 @@ export interface InboundContext {
   policy: AccessPolicyConfig
   /** Live chat lookup (loop-residue reset + the B7 rate-limit window). */
   getChat(chatId: ChatId): InboundChat | undefined
-  /** Per-chat settings (recent-image registration for /ocr). */
-  getSettings(chatId: ChatId): ChatSettings
   /** B8c: lazy idle-chat sweep before each inbound message. */
   sweepIdleChats(): Promise<void>
   /** Media store: ref resolution, URL downloads, fresh-path writes, temp cleanup. */
@@ -187,14 +187,6 @@ export interface InboundContext {
    * media-bearing messages always queue, never steer). Optional: absent =
    * the pre-T2 pipeline (0.8.1 behavior for every message). */
   interceptBusyTurn?(chatId: ChatId, text: string, role: UserRole, nickname: string | undefined, plain: boolean): Promise<boolean>
-  /** T2-B3: ask_user_question answer seam — invoked for every plain message
-   * after ALL gates and BEFORE interceptBusyTurn. Parses the raw text as a
-   * reply to the chat's outstanding ask_user_question batch (纯选项选择 /
-   * 答:前缀 / 跳过 — see question-answer.ts) and settles it through the host
-   * userQuestions service. Returns true when consumed as an answer; any
-   * failure (no active batch, non-answer text, settle error/REPLY_QUEUED)
-   * returns false so the message reaches the conversation normally. */
-  interceptQuestionAnswer?(chatId: ChatId, text: string): Promise<boolean>
   /** Outbound facade (the B7 rate-limit notice). */
   sendToChat(chatId: ChatId, text: string): Promise<string[]>
   /** Bridge log line callback. */
@@ -334,13 +326,6 @@ export class InboundPipeline {
 
     // Fire-and-forget temp cleanup on each inbound.
     void this.ctx.media.cleanupExpired()
-
-    // Route commands before media/quote expansion. A reply-only group trigger
-    // must already have passed author verification above; explicit @ commands
-    // and private commands still avoid quote I/O. Register images lazily for /ocr.
-    for (const ref of inbound.media) {
-      if (ref.kind === 'image') this.ctx.getSettings(chatId).pendingImageRef = ref
-    }
     if (await this.ctx.tryHandleCommand(chatId, inbound.text, userId, nickname)) {
       currentTrace()?.emit('command', { ok: true, reason: TRACE_REASONS.inboundCommand })
       return
@@ -350,7 +335,7 @@ export class InboundPipeline {
     // reached here means command routing already declined (slash commands
     // returned above), so /silent and friends are never muted by their own
     // window. The message has already paid the dedup/mention gates; the
-    // lazy /ocr image registration above is harmless (the next image
+
     // refreshes the ref once the window lifts).
     if (this.ctx.isSilenced?.(chatId) === true) {
       this.ctx.log('debug', '静音窗口内，普通消息已忽略: ' + chatId)
@@ -370,13 +355,8 @@ export class InboundPipeline {
       const expansion = await this.expandForward(inbound.forwardId)
       forward = expansion.text
       if (expansion.media.length > 0) {
-        // Forward-embedded images ride the same buildBody pipeline (their
-        // '[图片]' placeholders are inline in the expansion text). Preserve
-        // the pre-routing /ocr ref so a direct image in the same message
-        // stays the /ocr target.
-        const pending = this.ctx.getSettings(chatId).pendingImageRef
+        // Forwarded images use the same media resolution as direct messages.
         forward = await this.ctx.buildBody(expansion.text, expansion.media, chatId)
-        this.ctx.getSettings(chatId).pendingImageRef = pending
       }
     }
 
@@ -395,15 +375,17 @@ export class InboundPipeline {
       currentTrace()?.emit('dispatch', { ok: false, reason: TRACE_REASONS.inboundEmptyContent })
       return
     }
-    let final = wrapUserMessage(content, userId, nickname)
+    let final = wrapUserMessage(content, userId, nickname, inbound.messageId)
     const role: UserRole = isAdmin ? 'admin' : 'member'
     if (kind === 'group') {
       // 权限分档 A1: the group prefix carries the sender's tier so the model
       // can see who it is talking to without trusting message-internal text.
-      final = buildGroupMessagePrefix(nickname, userId, mentioned, role) + final
+      final = buildGroupMessagePrefix(nickname, userId, mentioned, role, inbound.time) + final
       if (!isAdmin && this.ctx.config.restrictedMemberPrefix) {
         final = RESTRICTED_PREFIX + final
       }
+    } else {
+      final = buildDirectMessagePrefix(inbound.time) + final
     }
     // T2 (P1): the busy-turn policy seam runs AFTER every gate above (dedup /
     // self / policy / mention / command / rate-limit) and only around the
@@ -413,18 +395,6 @@ export class InboundPipeline {
     // messages always queue so the full media pipeline runs for their own
     // turn). Seam absent = pre-T2 behavior (straight dispatch).
     const plain = inbound.media.length === 0 && inbound.replyId === undefined && inbound.forwardId === undefined
-    // T2-B3: the ask_user_question answer seam runs BEFORE the busy-turn seam
-    // and only for plain text (media/quote/forward never parse as answers).
-    // A consumed answer ends here; any fall-through continues below unchanged.
-    // The @ segment stays in the text as @<qq> (cq.ts); drop the bot's own, or
-    // "@bot 1" never parses under requireMention. Only the parse sees this.
-    if (plain && this.ctx.interceptQuestionAnswer !== undefined
-      && await this.ctx.interceptQuestionAnswer(chatId, stripLeadingBotMention(
-        inbound.text, inbound.segments, inbound.raw, this.ctx.selfId(), this.ctx.config.botQQ,
-      ))) {
-      currentTrace()?.emit('dispatch', { ok: true, reason: TRACE_REASONS.questionAnswered })
-      return
-    }
     if (this.ctx.interceptBusyTurn !== undefined
       && await this.ctx.interceptBusyTurn(chatId, final, role, nickname, plain)) {
       return
@@ -506,7 +476,6 @@ export class InboundPipeline {
     text: string,
     media: MediaRef[],
     chatId: ChatId,
-    rememberImage = true,
   ): Promise<string> {
     if (media.length === 0) return text
     let out = text
@@ -514,7 +483,7 @@ export class InboundPipeline {
       const placeholder = placeholderFor(ref)
       const idx = out.indexOf(placeholder)
       // idx<0：占位符在文本里找不到（如手打的相同标签已先行被消费），跳过失败回退，原文保持不动。
-      const annotation = await this.resolveMediaRef(ref, chatId, rememberImage)
+      const annotation = await this.resolveMediaRef(ref, chatId)
       if (idx >= 0 && annotation !== '') {
         out = out.slice(0, idx) + annotation + out.slice(idx + placeholder.length)
       } else if (idx >= 0) {
@@ -532,7 +501,7 @@ export class InboundPipeline {
   }
 
   /** Resolve one media ref to a text annotation with a local path. */
-  async resolveMediaRef(ref: MediaRef, chatId: ChatId, rememberImage = true): Promise<string> {
+  async resolveMediaRef(ref: MediaRef, chatId: ChatId): Promise<string> {
     if (ref.kind === 'file') {
       return await this.resolveNasFile(ref, chatId)
     }
@@ -556,13 +525,6 @@ export class InboundPipeline {
     if (resolved === undefined) return ''
     switch (resolved.kind) {
       case 'image':
-        // Remember the most recent inbound image for /ocr (survives /new);
-        // consume the pre-routing pending ref so /ocr never re-resolves it.
-        if (rememberImage) {
-          const settings = this.ctx.getSettings(chatId)
-          settings.lastImagePath = resolved.path
-          settings.pendingImageRef = undefined
-        }
         return (ref.stickerLabel !== undefined ? '[表情包:' : '[图片:') + resolved.path + ']'
       case 'voice': {
         // M3-D4c: dispatch must not wait on STT — the [语音] placeholder ships
@@ -635,11 +597,11 @@ export class InboundPipeline {
         if (text.trim() === '') break
         const images = parsed.media.filter(ref => ref.kind === 'image')
         if (chatId !== undefined && images.length > 0) {
-          // Quotes are context, not a new direct /ocr target. Reuse the guarded
+
           // downloader without replacing either a resolved direct image or a
           // lazy ref registered before command routing. Never start background
           // transcription for quoted audio or fetch quoted merged forwards.
-          text = await this.buildBody(text, images, chatId, false)
+          text = await this.buildBody(text, images, chatId)
         }
         const name = sanitizeNickname(data.sender?.nickname ?? '')
         parts.push((depth === 0 ? '[引用]' : '[引用·第' + (depth + 1) + '层]') + (name !== '' ? name + ': ' : '') + text)

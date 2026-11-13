@@ -38,16 +38,12 @@ describe('health report (src/health.ts)', () => {
       JSON.stringify({ v: 1, ts: 1_760_000_010_000, traceId: 't-3', stage: 'inbound', ok: true }),
     ].join('\n') + '\n')
     const report = await healthReport(baseDeps(mediaDir, {
-      recorder: { enabled: true, redact: true, written: 7 },
-      inject: { enabled: true, dryRun: true, consumed: 4, intercepted: 9, skippedHistory: 2 },
     }))
     expect(report).toContain('▍dsh-onebot 体检')
     expect(report).toContain('连接：已连接（mode=reverse 127.0.0.1:8643')
     expect(report).toContain('重试/自愈：reverse 接管重试 0 次 · forward 重连 0 次 · 自愈中 否')
     expect(report).toContain('去重窗口：3 条在窗（dedupWindowSeconds=300）')
     expect(report).toContain('写闸门：本分钟 2/20 · 今日 40/500')
-    expect(report).toContain('录制：开启（redact=on，已写 7 行）')
-    expect(report).toContain('注入：开启（dryRun=on，已消费 4 行、拦截出站 9 次、跳过历史 2 条）')
     expect(report).toContain('qq-trace.jsonl')
     expect(report).toContain('最近 ok:false 事件（2 条）')
     expect(report).toContain('群聊未 @ 机器人，已忽略')
@@ -93,7 +89,7 @@ describe('secret redaction', () => {
 })
 
 describe('diagnostics archive (zip)', () => {
-  it('packs trace/inbox/audit/config/report with all secrets scrubbed, fail-closed', async () => {
+  it('packs trace/audit/config/report with all secrets scrubbed, fail-closed', async () => {
     const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-health-'))
     writeFileSync(join(mediaDir, TRACE_FILE), '决策事件 access_token: sk-live-123 已脱敏前\n')
     writeFileSync(join(mediaDir, 'qq-inbox.jsonl'), '{"v":1,"ts":1,"kind":"message","frame":{}}\n')
@@ -110,10 +106,11 @@ describe('diagnostics archive (zip)', () => {
     // Entries: names + config/report artifacts present (UTF-8 decode covers
     // both the stored names and the stored JSON content).
     const rawText = raw.toString('utf8')
-    for (const name of ['config-snapshot.json', 'health-report.txt', 'qq-trace.jsonl', 'qq-inbox.jsonl', 'qq-actions.log']) {
+    for (const name of ['config-snapshot.json', 'health-report.txt', 'qq-trace.jsonl', 'qq-actions.log']) {
       expect(rawText.includes(name)).toBe(true)
     }
     expect(rawText).toContain('"accessToken": "[REDACTED]"') // JSON form scrubbed
+    expect(rawText).not.toContain('qq-inbox.jsonl')
     expect(rawText).toContain('"botQQ": "10002"') // non-secret config values survive
   })
 

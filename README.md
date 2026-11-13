@@ -2,478 +2,103 @@
 
 > **[English](README.en.md) | 中文**
 
-给 DeepSeek Harness 加上 QQ 通道的 OneBot 11 插件。A OneBot 11 plugin that adds a QQ channel to dsh.
+给 dsh（DeepSeek Harness）提供 QQ 通道的 OneBot 11 插件，支持 SnowLuma、NapCat 等协议端。当前 fork 版本为 **0.9.19-kirito.3**。
 
-本插件把 dsh 变成一个 QQ 机器人（**OneBot 11 协议**，兼容 NapCat / Lagrange / LLOneBot / go-cqhttp；
-0.9.12 起新增兼容 [SnowLuma](https://github.com/SnowLuma/SnowLuma) 协议端——forward 模式对接其 `wsServers`（Bearer 头或 `?access_token=`，零改动兼容），reverse 模式服务端同时接受 Bearer 头与 `?access_token=` query 鉴权），
-与 [dsh-vision](https://github.com/dsh-external/dsh-vision) 同款的外部插件形态：**零 Python、纯 TS、
-原生 Cordis 插件**，挂载进 dsh 宿主进程，不改任何核心代码。
+用户消息经 QQ 网关进入插件，再交给对应聊天的 dsh Agent；模型回复经插件转换为 QQ 消息。插件负责连接、消息转换与通道访问控制，模型、预设和工作区通过宿主管理或插件配置选择。
 
-```
-用户(QQ) ←→ NapCat ←→ dsh-onebot 插件 ←→ dsh Agent（每个会话一个）
-                        ├─ 反向 WS 服务器 / 正向 WS 客户端（自动重连）
-                        ├─ 入站：CQ 解析、图片下载、语音转写(STT)、引用/合并转发展开
-                        └─ 出站：单条/t2i 卡片发送、Markdown 剥离、[[qq_forward]]、图片/语音/视频/文件工具
-```
+## 当前能力
 
-## 架构
+| 类别 | 保留的能力 |
+| --- | --- |
+| 连接 | 正向/反向 WebSocket、令牌鉴权、get_status 心跳、断线重连、慢速自愈与连接诊断 |
+| 入站 | 私聊/群聊、CQ 与段数组解析、@ 和回复机器人唤醒、图片/表情包/文件/语音、引用图片与合并转发展开 |
+| 出站 | 纯文本、长文字图片卡片、合并转发、图片/语音/视频/文件、原生引用回复、ACP 元数据清洗 |
+| 交互 | 戳一戳（默认关闭）、排队/插话、正在输入提示、中间消息、自动撤回与小结卡 |
+| 会话 | 每个 QQ 聊天一个 Agent，持久化与重启恢复、/new 建立新会话、闲置回收与冲突恢复 |
+| 权限 | 私聊/群聊白名单、管理员与成员工具权限、消息去重与频控、主动发送限额与审计、媒体路径/下载边界 |
+| 运维 | 错误提示、长任务超时补发、链路追踪、/doctor 诊断与脱敏包、Web 设置面板、临时媒体清理 |
 
-![dsh-onebot QQ 通道架构](docs/dsh-onebot-architecture.png)
+收到语音后可使用本地 FFmpeg/Whisper 转写；SILK 解码由 silk-wasm 提供。文字图和入站图片压缩使用 canvas；文字图还使用 fontkit 与系统字体。
 
-> 可交互版本（暗/亮主题切换 + 引导视图）：[docs/dsh-onebot-architecture.html](docs/dsh-onebot-architecture.html)；矢量版：[docs/dsh-onebot-architecture.svg](docs/dsh-onebot-architecture.svg)。
+## 0.9.19-kirito.3 的职责精简
 
-## 功能
+本版删除以下能力及其专用状态、模块和设置入口：
 
-| 类别 | 能力 |
-|---|---|
-| 连接 | 反向 WS（NapCat ws-reverse 拨入，默认端口 8643）或正向 WS（拨出，默认 ws://127.0.0.1:3001）；断线自动重连（2s→60s 退避） |
-| 入站 | 私聊/群聊、段数组优先解析（CQ 字符串回退）、CQ 反转义、@/回复触发检测（fail-closed；回复仅认机器人自己的消息）、图片四路解析（url/base64/file/hash）、大图自动压缩（长边 ≤`inboundImageMaxPx`，GIF 不压）、文件段双通道接收（CDN 直链 get_private_file_url + get_file base64/url 回退）、表情 id→emoji/卡片/戳一戳段类型、引用消息自动取原文（get_msg）、合并转发自动展开（get_forward_msg） |
-| 语音 | ffmpeg 转 16kHz WAV + whisper 转写（openai-whisper / whisper.cpp / 自定义命令）；**非阻塞**：语音消息先以 [语音] 占位进入回合（不阻塞回复），转写完成后以「（语音转写：…）」补递（默认超时 60s）；转写失败/超时保留 [语音] 占位 |
-| 文字图 | t2i 卡片渲染器（@napi-rs/canvas）：标题/粗斜体/删除线/引用/列表/代码块/表格/行内 code 胶囊/彩色 emoji/中文标点禁则；与 Hermes 原版同款数值（800px/26px/禁则集合/右缘 790） |
-| 出站 | 正文 ≤ `textImageThreshold`（默认 150）字符单条发送、**超过阈值渲染 t2i 文字图卡片**（AstrBot 风格：标题/引用/列表/表格/代码块/彩色 emoji；渲染失败、PNG 超 `outboundImageMaxBytes` 或 `<=0` 禁用卡片时回退单条纯文本）、Markdown 剥离为 QQ 纯文本、[[qq_forward]] 合并转发（群/私聊）、**实时中间消息**（interimMessages：每条中间文本立即发出、实时可见；各自在 `interimRecallMs`（默认 90s）后自动单独撤回；回合结束时先把整轮中间消息渲染成一张 **t2i 小结卡**、立即撤回仍在屏幕上的原文、再发送最终回复——不用回合末合并转发，避免长回合「原文超 2 分钟撤不回+转发卡重复」；`interimRecall: false` 时降级为只发不撤（无小结卡、不撤回））、**宿主「计划书/提问卡」自动中继**（模型调用 exit_plan_mode 时把计划全文发到 QQ；**ask_user_question QQ 桥接**（0.9.11）：问题渲染成 QQ 选项卡、群友回复选项/`答:`/`跳过` 即回传答案，等待期内即时结算，300s 未答转 pending 后仍可回答，见「群聊权限分档与 ask_user_question 桥接」）、正在输入提示（set_input_status，仅私聊） |
-| 命令 | 斜杠命令（默认仅管理员；`/help` 群友可见成员视图）：`/new` 开新会话、`/stop` 停止生成、`/steer <补充内容>` 向运行中的任务补充指令（无运行任务时回用法提示；详见下方命令表与 `newMessagePolicy` 配置）、`/model` 查看或切换当前会话模型（`--default` 修改部署默认；无参输出两级序号列表，回复序号选 provider → 再回复序号选模型）、`/workspace` 查看或切换工作区（无参编号列表，回复序号即选）、`/preset` 查看或切换 agent 预设（无参编号列表，回复序号即选）、`/session` 查看可切回历史会话并按序号切回（`/new`、`/workspace`、`/preset` 切换下来的旧会话进列表，可来回切，历史上下文恢复）、`/status` 会话全景、`/doctor [export [参考号]|test]`（别名 `/healthcheck`）运行体检（export [参考号] 导出脱敏诊断包 qq-diagnostics-*.zip，文件名含触发参考号；`test` 一键自测收发链路）、`/retry` 重跑上一条、`/id` 会话标识、`/ver` 版本、`/ocr` 识别最近图片、`/mode` 切换出站模式（跨重启持久化）、`/plan` 计划模式、`/permission` 切换宿主权限预设（QQ 别名 `w`=工作区可写+需审批、`f`=全权+免审批；完整预设名照传，未知名由宿主报错并回显可用列表；无参查看当前与可用列表，序号按 available 顺序）、`/goal` 目标记录（跨重启持久化）、`/silent [分钟]` 临时免打扰（0.9.11 起，默认 30 分钟，再次 `/silent` 提前解除，见命令表）、`/help` 帮助（0.9.11 起群友可见成员视图，仅列群友可用的命令）；未知斜杠命令默认拦截并提示相近命令（`unknownCommand: passthrough` 改为透传给模型） |
-| 工具 | `qq_send_image`（≤9 张，路径或 URL）、`qq_send_voice`、`qq_send_video`、`qq_send_file`、`qq_send_segments`（1–9 段纯文本分段气泡，每段 ≤500 字，见下文「分段发送」）、`qq_send_forward`、`qq_napcat_api`（14 个白名单 action）、`qq_group_history`（文件编辑工具 `code_safe_edit` 等已拆至独立插件 dsh-safe-edit，见下文「安全编辑」） |
-| 权限 | 管理员白名单（`ONEBOT_ALLOWED_USERS`）、dm/group 策略（open/allowlist/disabled）、群聊 @提及 gating、**群聊权限分档**（0.9.11：每条群消息前缀标注发言人档位·管理员/·成员；成员档位回合禁用全部 `qq_*` 工具，`permissions.memberTools: all` 可放开）、受限用户 [受限用户:仅问答] 软限制、出站敏感内容审计 |
-| 会话 | 每个 QQ 会话一个持久 Agent（session id 稳定派生），重启后自动 resume；按 `agentPreset`/`agentPresetGroup`/`workspacePath` 挂载到 preset 与工作区；每轮结束 flush 落盘 |
-| 运维 | 热加载：profile 层 patch 的 **config 覆盖**与 **insert 新增/删除**均热生效——插件 fiber 秒级原地重启（宿主进程不重启；代价：QQ 桥一次秒级重连、在途回合中断）；touch/内容未变不触发任何动作；bundle 自带 patch、仓库模板、部署副本的 patch 文件与根配置 `cordis.yml` 的改动**不**热生效；临时媒体 TTL 过期清理 |
-| 提示词 | 自动注入 QQ 平台说明（纯文本输出、图片/语音标注 `[图片]`/`[语音]` 占位、工具与命令指引、`ask_user_question` QQ 桥接、禁宿主 Web 审批卡 `exit_plan_mode`）；按**每个 QQ 会话 agent 自身作用域**注入，Web 会话不可见 |
+- 目标记录 /goal。
+- 宿主计划/权限/工作区命令 /plan、/permission、/workspace。
+- QQ 中的模型/预设切换 /model、/preset，以及历史切换 /session。
+- QQ 专用 ask_user_question 工具、选项回答/等待处理和计划书转发。
+- 入站原始消息录制、文件事件注入、干跑拦截与离线回放。
+- 独立 /ocr 命令及最近图片状态。
 
-## 兼容性
+既有会话的磁盘日志和重启恢复继续保留，/new 会退休旧 ID，避免覆盖旧日志。旧映射中的 goal、workspacePath 等已删除状态不再恢复或写回；旧 switchable-sessions.json 不再使用。模型选择记录仍由宿主会话负责，已记录的预设按会话恢复。
 
-| 项 | 要求 |
-|---|---|
-| dsh | ≥ 0.1.5-rc.1（`engines.dsh`：0.1.5/0.1.6/0.1.7 全线 + 0.2.0 线 ≥0.2.0-rc.1；@deepseek-ai/* peer 依赖同范围，JsonValue 由 dsh-util-values 提供） |
-| Node.js | ≥ 22 |
-| OneBot 11 实现 | NapCat / Lagrange / LLOneBot / go-cqhttp / SnowLuma（reverse 或 forward WebSocket） |
-| 可选依赖 | 语音转写需 ffmpeg + whisper CLI；t2i 文字图在 Linux 需 Noto CJK 字体 |
+旧调试配置 recordInbound、inboxRedact、injectEnabled、injectDryRun、injectIntervalMs 不再有执行路径，也不能通过设置接口写入。升级时可从配置中清理这些旧键。诊断仍包含 trace、操作审计、配置摘要与报告，不打包旧原始消息录制文件。
 
-最后验证：2026-10-12（0.9.0 发版批次 W1–W3 五特性：v4 命令审计 / verify 体检脚本 / 排队插话+autoSteerPolicy / 超时补发 / 诊断参考号——npx tsc --noEmit 零错误、vitest 532 用例全绿；M0 安全语义保持：reverse 空 token 拒绝启动、默认仅监听 127.0.0.1 为 BREAKING 变更，见下方配置表说明）。
+移除的是独立 OCR 命令：Gemini 等模型的原生看图继续可用；保留的 qq_napcat_api 仍遵循其 API 白名单。
 
-## 安装
+## QQ 命令
 
-**前置**：dsh（≥0.1.5-rc.1）在 PATH 上；NapCat 或其他 OneBot 11 实现已运行。
+除 /help 提供普通成员视图外，命令仅管理员可用。
 
-### npm 安装（发布通道，与下方源码安装二选一，勿混装）
+| 命令 | 用途 |
+| --- | --- |
+| /new | 开新会话，旧日志保留 |
+| /stop | 停止生成并清理待处理角色与本聊天的超时跟踪 |
+| /steer 内容 | 向正在运行的任务追加补充指令 |
+| /status | 查看当前会话、模型、配置预设、工作目录和运行状态 |
+| /doctor [export [参考号]\|test] | 诊断、导出脱敏包或测试发送；/healthcheck 为别名 |
+| /retry | 重试上一条用户消息 |
+| /id、/ver | 查看会话标识、插件版本 |
+| /silent [分钟] | 临时静音，再发无参数 /silent 提前解除 |
+| /mode [interim\|instant] | 切换当前聊天的出站模式 |
+| /help | 列出可用命令 |
 
-```sh
-dsh plugin --profile web add dsh-onebot-qq
-```
-
-（或用 Web 界面的 Plugins 页安装。）随后：
-
-1. 在 profile 目录 `<DSH_HOME>/profiles/web/` 的 `pnpm-workspace.yaml` 中写入两行
-   （实测 pnpm 12 不读项目级 `.npmrc`，见 `docs/npm-e2e-report.md` D1）：
-
-   ```yaml
-   autoInstallPeers: false
-   hoist: false
-   ```
-
-   ——防止 pnpm 自动拉入 registry 上陈旧的 `@deepseek-ai/*` 独立副本。npm/pnpm 版本差异：
-   此配置仅 pnpm 12 用户必须（pnpm 12 已不读 `.npmrc`）；npm 用户无此问题——实测 npm 默认
-   peer 自动安装拉入的 registry 现版本满足 peer 范围（`docs/npm-e2e-report.md` §1 #2）。
-   运行期 peer 统一由宿主解析层完成：插件 import 的 `@deepseek-ai/*`
-   只要声明在该包 peerDependencies 里，就会被宿主拦截并重定向到宿主安装树的同一实例，
-   无需任何 npm override。
-2. 把包内 `cordis.patch.yml` 模板的两行 insert 合并进 profile 层
-   `<DSH_HOME>/profiles/web/cordis.patch.yml`：主条目 `name: 'dsh-onebot-qq'`，
-   host-plane 行 `name: 'dsh-onebot-qq/settings-remote'`；config 覆盖须挂
-   patch 顶层同 id 行（详见模板头注释）。
-3. **不要**在 profile 的 package.json 手写任何 `@deepseek-ai/*` 依赖——手写副本会
-   覆盖宿主安装树成为拦截目标，造成版本错位双包。
-4. 若安装被兼容门拒绝（dsh 版本不在 peer 范围内），按官方口径用
-   `dsh plugin allow-version ... --accept-risk` 显式豁免。
-
-### 方式二：git clone 源码安装
-
-```sh
-git clone <repo> ~/dsh-plugins/dsh-onebot
-cd ~/dsh-plugins/dsh-onebot
-npm install --include=dev
-./scripts/build.sh          # 链接宿主 @deepseek-ai 包 + tsc 编译 src/ → lib/
-```
-
-> **部署副本必须带完整 node_modules 链接集**（`scripts/link-host.sh` 产物）：`files` 只打包 `lib/`，
-> 但运行时 peer 依赖 `@deepseek-ai/*` 是链接到宿主安装的——只复制 `lib/` 会挂载失败（插件入口会
-> 显式报「peer 依赖解析失败」错误）。宿主无 `dsh` 在 PATH 上（如 fnOS 应用形态）时用逃生门：
-> `DSH_ROOT=<宿主node_modules路径> ./scripts/build.sh`。
-
-**fnOS 应用形态宿主构建**：fnOS 应用中心安装的 dsh 没有 `dsh` CLI 在 PATH 上，`build.sh` 的自动定位
-（PATH 二进制 → npx store）会失败并显式报 `cannot locate the dsh install`。此时用 `DSH_ROOT` 显式指定
-宿主 node_modules 根（该目录下须有 `@deepseek-ai/`，否则报错退出而非静默回退）：
-
-```sh
-DSH_ROOT=<fnOS 应用数据目录>/node_modules ./scripts/build.sh
-```
-
-构建完成后把部署副本（`lib/` + 完整 node_modules 链接集）放到目标位置再挂载；运行副本缺链接集同样会挂载失败（见上方说明）。
-
-挂载到 ~/.dsh/config.yaml（没有就新建）：
-
-```yaml
-- insert:
-    - id: dsh-onebot
-      name: '$HOME/dsh-plugins/dsh-onebot/lib/index.js'
-      config:
-        mode: reverse        # reverse = NapCat 拨入；forward = 插件拨出
-        port: 8643
-        # accessToken: '与NapCat一致的token'   # 必配：reverse 模式留空将拒绝启动（M0 安全加固）
-        # botQQ: ''          # 留空自动从 meta 事件学习
-        adminUsers: ['你的QQ号']   # 必配：至少一个管理员，否则私聊/斜杠命令不可用
-```
-
-> ⚠️ **首次配置必须设置至少一个管理员**（`adminUsers` 或环境变量 `ONEBOT_ALLOWED_USERS`）：
-> `dmPolicy: open`（默认）只允许管理员私聊，斜杠命令也仅管理员可用；不设置则无人能对话。
-> 开发调试可临时 `allowAllUsers: true`（或 `ONEBOT_ALLOW_ALL_USERS=true`）放行所有用户。
-
-重启 dsh（`dsh web` 或你的启动方式），日志出现 `[dsh-onebot] mounted` 即挂载成功。
-
-**NapCat 侧（必须配置，两种模式二选一）**：
-
-- **reverse 模式（NapCat 拨入 dsh，推荐）**：NapCat 网络设置里新增「**WebSocket 客户端**」，
-  「上报地址」填 dsh 的 WS 地址 `ws://<dsh 所在机器 IP>:<port>/ws`（如 `ws://192.168.1.100:8643/ws`），
-  「token」填插件 `accessToken` 相同的值；dsh 与 NapCat 不同机时不能用 `127.0.0.1`。
-- **forward 模式（dsh 拨出到 NapCat）**：NapCat 网络设置里启用「**WebSocket 服务端**」（默认监听
-  `0.0.0.0:3001`），插件 `url` 配置为 `ws://<NapCat 所在机器 IP>:3001`（同机可用
-  `ws://127.0.0.1:3001`），token 两边一致。
-
-两侧 token 必须一致；消息上报格式建议选「**数组**」（插件段数组优先解析，CQ 字符串仅回退）。
-配置完成后重启 dsh，日志出现 `[dsh-onebot] mounted` 且 NapCat 显示连接成功即就绪。
-
-**部署位置要求**：NapCat 必须部署在 dsh **可达的局域网**内（同一网段/能互通），
-WS 连接、图片下载、文件解析都依赖这条网络通路；NapCat 与 dsh 不在同一台机器时，
-需要在 NapCat 侧**开启「文件转 URL」开关**，`get_file` 才会返回可下载的 http(s) url
-（否则返回容器内路径，本插件无法访问）。
+未知命令默认拦截并提示；unknownCommand: passthrough 时按普通文本交给模型。普通数字、“答:”和“跳过”不再被选择或提问状态截获。
 
 ## 配置
 
-完整配置项见 [src/index.ts](src/index.ts) 的 `Config` schema（schemastery 校验，均有默认值）。常用：
+沿用宿主 profile 的插件覆盖项；端口、令牌与凭据保留在部署配置中。常用键：
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `mode` | `reverse` | `reverse`/`forward` |
-| `host` / `port` | `127.0.0.1` / `8643` | reverse 监听；跨机部署（NapCat 从其他机器拨入）需显式改为 `0.0.0.0` |
-| `url` | `ws://127.0.0.1:3001` | forward 目标 |
-| `reconnectMaxAttempts` | `100` | 自动重连放弃上限：连续失败达到该次数后停止重连，日志输出上限值与恢复指引；`0` = 无限重连（退避封顶 60s） |
-| `accessToken` | 空 | OneBot token；**reverse 模式必填**，留空插件拒绝启动（fail-closed）；forward 可为空 |
-| `botQQ` | 空 | 机器人 QQ（空=自动学习） |
-| `ignoreSelf` | `true` | 忽略机器人自己发出的消息（防自循环） |
-| `requireMention` | `true` | 群聊需 @ 或回复机器人的消息才响应；仅靠引用触发时通过 `get_msg.sender.user_id` 确认原作者，回复他人、作者未知或查询失败均不触发（fail-closed）。显式 @机器人不受引用查询结果影响 |
-| `rateLimitPerMinute` | `30` | 每会话每分钟普通消息上限（60s 滑动窗口）：超限跳过处理并限流提示（每窗口至多一条），命令不受限；`0` = 禁用 |
-| `dedupWindowSeconds` | `300` | 入站消息去重窗口（秒，W2-②）：同一会话内相同 message_id 在该窗口内重投（断线重连重放等）只处理第一条，后续静默跳过并记 debug；仅对会触发回复处理的消息事件生效（notice/meta 类不经过此闸）；`0` = 禁用去重 |
-| `actionRatePerMinute` | `20` | 主动写操作每分钟全桥合计上限（W2-③）：约束 qq_send_image/voice/video/file/segments 与 qq_send_forward 等工具发起的主动发送（回合内的被动回复/interim/通知不受此闸，由 rateLimitPerMinute 与离线队列上限约束）；超限拒发并记 warn 与审计；`0` = 禁用分钟限额 |
-| `actionRatePerDay` | `500` | 主动写操作每日（本地自然日）全桥合计上限（W2-③）：口径同 `actionRatePerMinute`；超限拒发并记 warn 与审计，次日自动恢复；`0` = 禁用日限额 |
-| `actionAuditEnabled` | `true` | 主动写审计（W2-③）：每次主动写（成功/失败）与拒发事件追加写一行 JSON 到 `mediaDir/qq-actions.log`（含 ts/chatId/action/ok/reason）；写失败仅 warn 不影响发送 |
-| `traceEnabled` | `false` | 链路追踪（W1）：为每条入站消息生成 traceId 并贯穿入站→模型回合→出站，决策事件（含限流/去重/白名单/@ 门控/闸门拒发与每个静默丢弃分支的中文 reason）逐行 JSON 落盘 `mediaDir/qq-trace.jsonl`（4MiB 改名轮转，保留 `qq-trace.1/2.jsonl`；同一原因 5 分钟限频；异步队列写不阻塞管线）；默认关闭——关闭时不生成 traceId、不落盘、决策行为与 0.6.0 完全一致 |
-| `traceLevel` | `debug` | 追踪事件级别（W1）：`debug` 记录全部决策事件；`warn` 仅记录 ok:false（被拒/失败/丢弃）事件 |
-| `logLevel` | `info` | 控制台日志级别门槛（debug < info < warn < error）：低于该级别的日志不输出。`debug` 全部输出（含「session 事件早退」等调试行）；`info` 常规信息（启动、连接建立、meta 事件等，默认）；`warn` 仅警告与错误；`error` 仅错误 |
-| `recordInbound` | `false` | 入站录制（W1）：把收到的每条入站事件（含被门控跳过的，附当时决策 reason）按可回放形状逐行 JSON 追加写 `mediaDir/qq-inbox.jsonl`（2MiB 改名轮转，保留 `qq-inbox.1/2.jsonl`；注入的帧不会被二次录制，杜绝「注入→录制→回放→注入」自激）；纯旁路：写失败仅 warn 限频，绝不影响回复管线 |
-| `inboxRedact` | `false` | 录制脱敏（W1）：落盘前把帧中 6 位以上的数字串（QQ 号/群号等）脱敏为前 3 位+`****`（数字型 id 字段一并处理），便于把录制文件发给别人离线回放（`npm run replay`） |
-| `injectEnabled` | `false` | 事件注入通道（W1，**仅调试用**）：开启后按 `injectIntervalMs` 轮询 `mediaDir/qq-inject.jsonl`，把新行（每行一个 OneBot 消息事件 JSON）喂进**真实入站管线**（trace 事件标 `stage=inject`）；启动时已存在的历史行跳过并记一条说明。信任边界：注入是调试通道，默认全关，勿在生产开启 |
-| `injectDryRun` | `true` | 注入干跑（W1，**强烈建议保持 `true`**）：注入回合触发的全部出站写操作（发消息/撤回等，**含异步模型回合的最终回复**——拦截点在出站动作层）被拦截计数、原文进 trace 事件、绝不真发 QQ；真实消息到达同一会话立即解除拦截（不连坐真人）；`false` = 注入内容会真实发送，仅限隔离环境实验 |
-| `injectIntervalMs` | `2000` | 注入队列轮询间隔（毫秒，W1；最小 500） |
-| `unknownCommand` | `intercept` | 未知斜杠命令处置：`intercept`（默认）拦截并提示相近命令（前缀匹配优先，编辑距离 ≤2 兜底且仅输入长度 ≥4 时启用，至多 3 个候选；无候选提示发 `/help` 或去掉开头 `/` 重发）；`passthrough` 维持旧行为透传给模型。非 `/纯单词` 开头的文本（如路径 `/tmp/x`）不受影响 |
-| `newMessagePolicy` | `queue` | 任务运行中收到新普通消息的处理策略（P1）：`queue`（默认）=排队——消息在当前任务结束后按序处理为后续回合，等待期间每运行回合至多回复一次排队提示；`steer`=插话——运行中收到的新普通纯文字消息作为补充指令加入当前任务（模型在下一步读取）并回复提交提示。例外：图片/文件/语音/带引用或合并转发消息与 `[受限用户:仅问答]` 群成员消息两种模式下都按排队处理（软限制不放宽、媒体管线不被绕过）；自动插话资格由 `autoSteerPolicy` 控制；`/steer` 命令两种模式下均可用；无运行中任务时行为与该配置无关（与 0.8.1 一致）。设置页 behavior 组可改，热重启生效 |
-| `autoSteerPolicy` | `admin` | steer 模式下自动插话的发送者资格（T9，用户裁决 2026-10-12）：`admin`（默认）=仅管理员可自动插话；`all`=所有非受限发送者均可。不具备资格的消息按排队处理（入队+排队提示）；`/steer` 命令始终仅管理员、不受本项影响；`queue` 模式行为完全不变。设置页 behavior 组可改，热重启生效 |
-| `notices.steerAccepted` | `true` | steer 模式下补充指令受理后的自动回执（布尔或字符串；开关 0.9.10 起，自定义文案 0.9.13 起）：`false` 或空串 `""` = 不发，插话照常受理；`true` 或缺省 = 默认文案；非空字符串 = 自定义文案。`/steer` 命令的确认回复：`false` 时仍发默认文案，非空字符串时同样改用自定义文案，空串时不发 |
-| `notices.queue` | `true` | 消息排队提示，每个运行回合至多一条（布尔或字符串；开关 0.9.10 起，自定义文案 0.9.13 起）：`false` 或空串 `""` = 不发，新消息照常排队；`true` 或缺省 = 默认文案；非空字符串 = 自定义文案 |
-| `notices.answerAccepted` | `true` | 问题回答回执（布尔或字符串，0.9.13 起）：`false` 或空串 `""` = 不发，回答照常提交；`true` 或缺省 = 默认文案「✔ 已提交回答」；非空字符串 = 自定义文案 |
-| `notices.deferredTimeout` | `true` | 等待模型回复超时提示，阈值见 `deferredTimeoutMs`（布尔或字符串，0.9.13 起）：`false` 或空串 `""` = 不发，回合照常继续并登记超时补发；`true` 或缺省 = 默认文案；非空字符串 = 自定义文案（整句替换，默认文案里的等待秒数不再出现） |
-| `notices.rateLimited` | `true` | 消息太频繁的频控提示，每分钟至多一条（布尔或字符串，0.9.13 起）：`false` 或空串 `""` = 不发，超限消息照常丢弃；`true` 或缺省 = 默认文案；非空字符串 = 自定义文案 |
-| `segments.enabled` | `true` | `qq_send_segments` 分段发送工具开关（0.9.10 起）：`false` = 工具下线（模型不可见，无法调用）；`true` = 工具可用（默认，与 0.9.10 之前行为一致） |
-| `segments.intervalMs` | `0` | 分段消息相邻两段的发送间隔（毫秒，0.9.10 起）：逐条发送之间的间隔营造打字呼吸感；范围 0–3000，超界按边界截断；`qq_send_segments` 工具的 `intervalMs` 参数可按次临时覆盖（同样截断到 0–3000）；`0` = 不等待 |
-| `deferredTimeoutMs` | `600000` | 等待模型回复超时阈值（毫秒，T3/P2 超时补发）：回合超过该时长没有任何模型输出时，向聊天回复一条超时提醒并把回合登记进补发注册表（继续运行、不放弃）；回合完成后向原聊天补发最终文字（带「（超时补发）」前缀，走既有出站分段/t2i 规则），只补最终文字与终态通知——不重放审批/提问卡/文件工具调用/图片；发送明确失败最多尝试 3 次（退避 2s/10s），发送结果不确定（动作超时/非网关错误，消息可能已到达）时保留记录并停止自动重试防重复；注册表逐行 JSONL 落盘 `mediaDir/deferred-delivery.jsonl`（原子写、逐行损坏降级、缺失=全新），插件重启后自动恢复未完结条目的跟踪；`/stop` 只终止当前聊天提交的回合并显式终止该聊天的补发跟踪（其他聊天不受影响）；正常完成（未超时）零注册表写入、零补发。设置页 behavior 组可改，热重启生效；`0`=关闭 |
-| `dmPolicy` | `open` | 私聊策略：`open`(仅管理员)/`allowlist`(白名单)/`disabled` |
-| `groupPolicy` | `open` | 群聊策略：`open`(所有人)/`allowlist`/`disabled` |
-| `restrictedMemberPrefix` | `true` | 群聊非管理员消息注入 `[受限用户:仅问答]` 前缀（软限制） |
-| `adminUsers` | `[]` | 管理员 QQ；也可用 `ONEBOT_ALLOWED_USERS` 环境变量。**必须至少设置一个**，否则私聊（dmPolicy=open）与斜杠命令无人可用 |
-| `allowFrom` / `groupAllowFrom` | `[]` | 白名单用户/群 |
-| `interimMessages` | `true` | 工具调用之间的中间文本是否立即发送；`false` 只发最终回复 |
-| `interimRecall` | `true` | 中间消息撤回与回合末小结卡开关；`false` = 只发不撤（降级：无小结卡、不撤回，中间消息留在屏幕上） |
-| `sendErrorNotice` | `true` | 一轮运行出错时向用户发送 ⚠️ 错误提示 |
-| `sensitivePatterns` | `[]` | 出站敏感内容审计正则（内置 `rm -rf`/关机/删库/密钥 等模式；留空用内置默认） |
-| `sttEnabled` | `true` | 语音转写（需 ffmpeg + whisper CLI） |
-| `sttEngine` | `auto` | STT 引擎：`auto`(自动探测 whisper-cli/whisper/mlx_whisper)/`openai`/`whisper-cpp`/`custom` |
-| `sttModel` | `small` | whisper 模型 |
-| `sttCommand` | 空 | `custom` 引擎的程序名/路径 |
-| `sttArgs` | `[]` | `custom` 引擎参数模板，`{file}` 与 `{out}` 会被替换 |
-| `sttTimeoutMs` | `60000` | 语音转写超时（毫秒；v0.4.0 起默认 60s，此前 300s）：超时保留 [语音] 占位；`<=0` 回落内置 60s |
-| `textImageThreshold` | `150` | t2i 卡片阈值：正文长度 ≤ 该值单条发送；> 该值渲染为文字图卡片。渲染失败、PNG 超 `outboundImageMaxBytes` 或 `<=0` 禁用卡片时回退单条纯文本 |
-| `cardFooter` | `dsh` | 卡片页脚品牌（"Powered by <brand>"） |
-| `fontFiles` / `fontFamilies` | `[]` | t2i 字体文件/家族覆盖（Linux 部署必看：需安装 Noto CJK） |
-| `monoFamilies` | `[]` | t2i 渲染器代码文本（代码块/行内 code）优先使用的等宽字体家族名（0.9.10 起）：优先于 `fontFamilies` 与平台默认，中文正文不受影响。Windows 部署常用 `["Cascadia Code", "Consolas"]` |
-| `mediaDir` | `<dsh-home>/media/onebot` | 入站媒体/映射文件目录 |
-| `tempTtlHours` | `6` | 入站临时媒体文件保留时长（小时），到期自动清理 |
-| `inboundImageMaxPx` | `2048` | 入站图片长边上限（px）：超过则等比压缩后交给视觉模型（透明 PNG 保留、GIF 不压）；`<=0` 禁用（旧名 `imageMaxSize` deprecated，本版兼容读取） |
-| `outboundImageMaxBytes` | `8388608` | 出站图片大小上限（字节）：t2i 小结卡等出站图片超限时自动回退纯文本（旧名 `maxImageBytes` deprecated，本版兼容读取） |
-| `maxVoiceBytes` | `15728640` | 出站语音大小上限（字节） |
-| `maxFileBytes` | `20971520` | 出站视频/文件大小上限（字节） |
-| `inboundFileMaxBytes` | `20971520` | QQ 入站文件大小上限（字节）：超限文件拒收并提示（旧名 `maxInboundFileBytes` deprecated，本版兼容读取） |
-| `allowPrivateHosts` | `false` | 下载媒体 URL 时允许私网/环回地址（仅跳过私网检查，协议白名单与限长仍生效）；仅本机反代等可信场景开启，公网部署保持 `false` |
-| `fileRefRoots` | `[]` | 允许复制的 `file://` 源根目录；空数组默认拒绝所有入站 `file://` ref。路径按 `realpath` 校验，必须落在这些根目录内，被拒时打一条 warn 日志。只影响以 `file://` 形式返回图片、语音、视频的 OneBot 实现；文件段走 `get_file` 等接口，http(s) URL、base64 和不带 `file://` 前缀的本地路径也都不走这项检查，配置它对这些情况没有作用 |
-| `allowCidrs` | `[]` | 可选 CIDR 白名单（如 `100.64.0.0/10`、`fd7a:115c:a1e0::/48`）：只放行这些私网段，其他私网仍拒绝；空数组保持原行为；格式错误启动即报错 |
-| `agentPreset` | 空 | 会话挂载的 agent preset（留空=默认） |
-| `agentPresetGroup` | 空 | 群聊会话的 agent preset id（粗档，0.9.11 起）：设置后群聊会话优先使用它，私聊仍用 `agentPreset`；留空=群私同源。`/preset` 的 per-chat 覆盖仍最优先 |
-| `permissions.memberTools` | `none` | 成员档位（非管理员）的工具权限（0.9.11 起）：`none`（默认）= 成员回合禁用全部 `qq_*` 工具（插件硬拦截，无需模型自觉）；`all` = 不限。缺省配置 fail-closed 为 `none`；无 QQ 会话映射的调用方（Web 等其他通道）不受此档位约束 |
-| `workspacePath` | 空 | 会话挂载的工作区（留空=宿主进程 cwd；未配置时插件启动会 warn 一次建议显式配置——宿主未提供可编程查询的默认工作区）。`/workspace` 的 per-chat 覆盖已持久化进映射文件，重启不丢 |
-| `chatIdleEvictDays` | `7` | 会话空闲淘汰天数：chat 超过该天数无任何活动时，在下一条入站消息处理前清理其内存态 agent（会话先 flush 落盘、映射保留，同一 chat 之后再发消息可 resume 恢复原会话）；`0` = 禁用 |
+| 键 | 默认值 / 用途 |
+| --- | --- |
+| mode / host / port / url | reverse / 127.0.0.1 / 8643 / ws://127.0.0.1:3001 |
+| accessToken | reverse 必填；forward 用于出站握手鉴权 |
+| botQQ | 留空时从协议事件学习自身身份 |
+| adminUsers | 管理员 QQ 列表，也可通过 ONEBOT_ALLOWED_USERS 提供 |
+| dmPolicy / groupPolicy | 私聊默认仅管理员，群聊默认 open；可选 allowlist/disabled |
+| allowFrom / groupAllowFrom | 私聊用户与群聊白名单 |
+| requireMention | true；群聊需明确 @ 或回复机器人自己的消息 |
+| pokeEnabled | false；开启后只响应明确戳向已知机器人的事件，同一会话同一发起者 3 秒节流 |
+| agentPreset / agentPresetGroup | 私聊与群聊的配置预设；群聊项为空时沿用基础预设 |
+| workspacePath | 默认工作区；留空使用宿主进程工作目录 |
+| maxQuoteDepth | 1；整数 0–5，0 关闭引用展开，循环引用停止 |
+| newMessagePolicy / autoSteerPolicy | queue / admin |
+| interimMessages / interimRecall | true / true；可关闭过程消息或自动撤回 |
+| textImageThreshold | 150；超过阈值转文字图，<=0 禁用文字图 |
+| sttEnabled | true；需要已安装并配置相应语音转写引擎 |
+| traceEnabled / actionAuditEnabled | false / true |
 
-> ⚠️ **BREAKING（M0 安全加固）**：reverse 模式下 `accessToken` 留空会拒绝启动（fail-closed）；`host` 默认从 `0.0.0.0` 改为 `127.0.0.1`（仅本机监听），跨机部署需显式配置 `host: 0.0.0.0`。
+完整配置见 [src/index.ts](src/index.ts)。设置面板保留连接、权限、行为与诊断四组共 25 个字段；高级项可在配置文件中设置。保存配置会重载插件，可能中断在途回合并短暂重连。
 
-环境变量：`ONEBOT_ALLOWED_USERS`（逗号分隔管理员）、`ONEBOT_ALLOW_ALL_USERS=true`（开发用）。
+原生看图需要宿主预设提供图像工具；插件将图片解析为本地路径，不会自动为模型开放通用文件或终端权限。引用图片深度、CQ/表情包解析、媒体下载和路径边界继续有效。
 
-### 引用唤醒的查询成本与诊断
+## 模型工具
 
-本 fork 的 `0.9.19-kirito.1` 会解析引用中的图片、表情包和 CQ 图片段，沿用入站媒体的下载与安全检查。引用图片以 `[图片:本地路径]` 或 `[表情包:本地路径]` 交给会话；需要为预设启用看图工具（如 dsh 原生 `read_image`），并使用支持图片输入的模型。它不会替换当前消息的 `/ocr` 图片目标。
+保留 qq_send_image、qq_send_voice、qq_send_video、qq_send_file、qq_send_forward、qq_send_segments、qq_napcat_api 和 qq_group_history。成员回合默认禁用这些工具，permissions.memberTools: all 可显式放开。
 
-在插件的 `config` 中设置 `maxQuoteDepth`（整数 `0–5`，默认 `1`）：`0` 关闭引用展开，`1` 只展开直接引用，`2` 再展开一层被引用的引用。达到上限、遇到循环 ID 或查询失败就停止；已展开的内容和当前提问仍保留。此高级选项通过 `cordis.patch.yml` 配置，暂不在插件专用设置页显示。每个引用 ID 在同一链中最多查询一次；引用内的合并转发不递归展开，语音不自动转写。关闭展开不会关闭回复唤醒的原作者校验。
+模型可在回复开头写 [[reply:<mid>]] 引用入站边界中的消息 ID，负数 ID 也支持；正文中提及该语法不会被当作引用指令。文字图和断线补发保留引用目标。
 
-开启 `requireMention` 时，通过群策略与去重检查、机器人身份已知且没有显式 @ 的有效引用消息，每条都会发起一次 `get_msg` 来确认原作者，群友之间互相引用也一样。校验通过后，引用展开复用该响应，不再重复查询。查询发生在入站消息限流之前，因此 `rateLimitPerMinute` 不限制这些查询；当前不使用跨消息缓存，如高流量群出现瓶颈再考虑缓存优化。
+## 构建与验证
 
-引用 ID 只接受可精确表示的十进制整数（支持负数），无效 ID 不发起查询。开启 trace 后，`mention` 阶段会区分无效 ID、查询失败或空响应、作者缺失、作者非机器人与普通未提及，便于排查拒绝原因。显式 @、私聊及关闭提及门控时，无效引用仅跳过展开，不阻断当前消息。
+使用与宿主匹配的 Node 和 @deepseek-ai 依赖。本次以 dsh 0.2.2-rc.1 / Node 24.22.2 验证。发布同名 npm 包属于上游，安装此 fork 时应使用对应版本的本地安装包或源码。
 
-## 录制 · 回放 · 注入 · 体检（W1）
+    npm install
+    DSH_ROOT=<宿主 node_modules 根> ./scripts/build.sh
+    npx tsc --noEmit
+    npx vitest run
+    npm pack
 
-| 能力 | 开关（默认） | 用法 |
-|---|---|---|
-| 入站录制 | `recordInbound`（**false**）+ `inboxRedact`（false） | 开启后每条入站事件逐行 JSON 追加写 `mediaDir/qq-inbox.jsonl`（含被门控跳过的事件与当时决策 reason；2MiB 改名轮转）；纯旁路，写失败仅 warn 限频 |
-| 离线回放 | 无需开关 | `npm run build` 后 `npm run replay -- <inbox.jsonl> [--media-dir <dir>] [--limit <n>] [--require-mention] [--bot-qq <qq>] [--admin <qq>] [--out report.json]`：读录制文件喂**真实入站管线**（强制 dry-run：不启 WebSocket、出站写全部拦截计数），输出每条消息的 traceId+决策链汇总；不依赖宿主运行。回放门控取自命令行参数（默认全放行），需复现线上门控请传相同策略 |
-| 事件注入 | `injectEnabled`（**false**）+ `injectDryRun`（**true**）+ `injectIntervalMs`（2000，最小 500） | **仅调试用**：往 `mediaDir/qq-inject.jsonl` 追加一行 OneBot 消息事件 JSON（可直接复制 `qq-inbox.jsonl` 的行），桥按间隔轮询喂进真实管线；dry-run 下该回合全部出站写（含异步模型回复）被拦截计数、原文进 trace（`stage=inject`），绝不真发 QQ。启动时已存在的历史行跳过并记一条说明 |
-| 体检+诊断包 | 无需开关 | QQ 里发 `/doctor`（仅管理员，等价别名 `/healthcheck`）：连接态/重试与自愈/去重与写闸门计数/trace·inbox·audit 文件大小/最近 5 条 ok:false 事件/最近故障参考号；`/doctor export [参考号]` 打包 trace+inbox+actions log+脱敏配置快照为 `mediaDir/qq-diagnostics-<ts>[-<参考号>].zip`（参考号省略时自动用最近一次故障的参考号；token/accessToken 强制脱敏，含最终字节扫描 fail-closed） |
-| 诊断参考号 | 无需开关 | 连接/桥类故障发 `QQ-CONN-<时间戳><随机>`、消息类故障发 `MF-<时间戳><随机>` 参考号（仅故障事件生成，正常流量零发号；参考号本身不含任何用户消息内容）。同一参考号贯穿四处：⚠️ 错误提示尾部、宿主日志「故障参考号 …」行、trace 事件 `data.ref`、`/doctor` 报告「最近故障参考号」节；诊断包导出文件名含触发参考号 |
+首次安装开发依赖后再执行 build；已有宿主链接时不要随意重装 node_modules。build.sh 会重建 src/ 的 JS/声明、从 client/index.js 生成设置面板，并清理已删除模块的旧构建产物。不要手改 lib/。
 
-## 设置页
-
-dsh Web GUI 的设置页提供本插件的可视化配置（host-plane Remote `onebotSettings`，写入 profile 层
-`cordis.patch.yml` 中 `dsh-onebot` 条目的 config 覆盖行——与手改 patch、宿主原生设置页是同一个持久层）。
-
-### 三组 19 键
-
-| 组 | 键 |
-|---|---|
-| connection（连接） | `mode`、`host`、`port`、`url`、`accessToken`、`botQQ` |
-| permissions（权限） | `requireMention`、`adminUsers`、`dmPolicy`、`groupPolicy`、`allowAllUsers`、`allowFrom`、`groupAllowFrom` |
-| behavior（行为） | `interimMessages`、`interimRecall`、`interimRecallMs`、`sendErrorNotice`、`unknownCommand`、`rateLimitPerMinute`、`newMessagePolicy`、`autoSteerPolicy`、`deferredTimeoutMs` |
-
-`accessToken` 在设置页做密码型输入，快照返回侧脱敏（不回显明文）；写入侧仍在 patch 文件明文落盘。
-
-### 与 patch config 的优先级
-
-**schema 默认值 ← bundle/底层 patch（继承层） ← profile 覆盖行（设置页写这里）**；同一层内后写的 patch
-条目胜出。设置页键与手改 patch 是同一层的同一行，不存在两套优先级。三组 19 键之外的键
-（media/STT/性能/`agentPreset` 等低频键）不设 UI，仍在同一行 config 手改 patch。
-
-### 生效方式
-
-每次保存（设置页或手改同一覆盖行）= 插件 fiber 秒级原地重启生效，宿主进程与 Web GUI 不重启；
-代价：QQ 桥一次秒级重连、在途回合中断、频控窗口与中间消息缓冲清零（会话映射/历史不受影响）。
-与当前覆盖行全等的保存是 no-op，不触发重启；写入导致插件激活失败时 patch 文件自动回滚、旧配置继续运行。
-
-## 会话工作区（workspace）选择
-
-每个 QQ 会话创建时按以下优先级确定工作目录（写入 session meta，**创建时冻结**，不随配置变化）：
-
-1. 该会话的 `/workspace` 覆盖（per-chat 记录，跨 `/new` 保留）
-2. 配置 `workspacePath`
-3. 宿主进程 cwd（`process.cwd()`）
-
-`/workspace <目录>` 切换（realpath + 目录校验）：记录覆盖后会 retire 当前 agent，
-下一条消息以新目录重建会话，旧会话保留在磁盘。`/workspace` 无参数输出编号列表
-（当前目录标「← 当前」），回复 `/workspace <序号>` 即可切换；`/workspace list` 列出全部 workspace 记录。
-
-`/workspace` 的 per-chat 覆盖已持久化进映射文件（chat-sessions.json，加法格式、兼容旧文件）：
-重启、会话恢复失败均不丢失，对 `/new` 同样保持——只要该 chat 用的是非默认目录，
-重启后 `/workspace` 与新会话都会继续使用原目录。
-
-会话自动挂载到 GUI 工作区：仅当会话 cwd 等于配置的 `workspacePath`（未配置时为宿主 cwd）
-才自动创建 workspace；沿用旧 cwd 的遗留会话只在已有 workspace 拥有该路径时挂载，不会自动新建。
-
-## 斜杠命令速查（默认仅管理员；`/help` 群友可见成员视图）
-
-| 命令 | 作用 |
-|---|---|
-| `/new` | 开启新会话（清空上下文，旧会话保留在磁盘） |
-| `/stop` | 停止当前生成 |
-| `/steer <补充内容>` | 向运行中的任务补充一条指令（agent 在下一步读取并回复提交提示）；两种 `newMessagePolicy` 模式下均可用；无运行中任务或参数为空时回复中文用法提示（不炸、不静默） |
-| `/model [--default] <provider> <model>` | 查看或切换当前会话模型；`--default` 修改部署默认。无参输出两级序号列表：回复序号选 provider → 再回复序号选模型并切换当前会话 |
-| `/workspace [路径\|序号\|list]` | 查看或切换工作区；无参输出编号列表（标「← 当前」），回复 `/workspace <序号>` 即切换；`/workspace list` 列出全部记录 |
-| `/preset [id\|序号]` | 查看当前/可用预设（无参编号列表，回复序号即选），或切换 preset（重建会话，新会话 header 记录） |
-| `/session [序号]` | 查看本会话可切回的历史会话（无参编号列表，每项含内容预览、建立时间与退休时间，id 截短显示；日志不可读的项显示「（内容不可读）」且不影响其余项），回复序号切回：当前会话退休进列表、目标会话恢复其历史上下文（含 per-chat 设置），支持来回切换；列表跨重启保留（switchable-sessions.json，每 chat 上限 20 条） |
-| `/status` | 会话全景：chat/session/preset/model/cwd/出站模式/agent/可切回数 状态 |
-| `/doctor [export [参考号]\|test]`（别名 `/healthcheck`） | 运行体检；`export [参考号]` 导出脱敏诊断包 qq-diagnostics-*.zip（文件名含触发参考号）；`/doctor test`（0.9.11 起）一键自测收发链路：推送一条标记消息验证出站，回报 连接状态/发送结果/时延 ms，失败附原因与参考号 |
-| `/retry` | 重跑上一条用户消息（上一轮出错后重试） |
-| `/id` | 只看 chat/session/cwd（排查用） |
-| `/ver` | 插件版本 + git commit |
-| `/ocr` | 识别本会话最近一张入站图片（NapCat ocr_image） |
-| `/mode [interim\|instant]` | 切换本会话出站模式（per-chat 覆盖，跨重启持久化） |
-| `/plan [off\|内容]` | 宿主计划模式（`/plan` 进入；`/plan off` 直接退出，无 Web 审批卡；`/plan <内容>` 进入并处理该内容） |
-| `/permission [w\|f\|预设名\|序号]` | 切换宿主权限 preset（沙箱模式+审批策略，切换立即生效）：`w`/`ws`/`write`/`工作区`→workspace-write（工作区内可写+需审批）、`f`/`full`/`danger`/`全权`→danger-full-access（全盘读写+免审批）；完整预设名照原样转发（未知名由宿主报错并回显可用列表）；无参渲染中文权限菜单（当前权限+可用预设编号列表+用法行，未知预设名标「部署自定义」；宿主回文格式变化时回退转发原文+快捷提示），纯数字序号按 available 顺序（现场解析，不落快照） |
-| `/goal [目标\|clear]` | 记录/更新本会话目标（每轮自动附带提醒，跨重启持久化） |
-| `/silent [分钟]` | 临时免打扰（0.9.11 起，仅管理员）：`/silent <分钟>` 静音 1–1440 分钟（默认 30），期间普通消息被忽略、斜杠命令仍可用；再次 `/silent`（无参）提前解除。窗口持久化到 ChatSettings（chat-sessions.json），跨 `/new` 与插件重启存活——静音是 chat 属性而非 session 状态 |
-| `/help` | 分组命令卡片（▍会话/输出/查询/操作/其他），每条带参数用法；报错提示均附用法或下一步动作。0.9.11 起群友也可调用：非管理员收到成员视图（仅列群友可用的命令 + 「其余命令需管理员」尾行；当前仅 `/help` 本身），管理员仍收完整视图 |
-
-`/preset` 切换为进程内 per-chat 覆盖（跨 `/new` 保留）：下一条消息重建会话并以新 preset
-写入 header，重启后 resume 按记录恢复；`/mode`、`/goal` 的 per-chat 状态已持久化进映射文件（v0.4.0 起，跨重启
-保留），`/workspace` 的覆盖同样持久化；`/plan` 仍为进程内覆盖，重启回退到默认。
-`/session` 的可切回列表按 chat 持久化在媒体目录的 switchable-sessions.json（读写纪律与 retired-sessions.json
-一致：文件缺失=全新、损坏保留内存、原子写；每 chat 上限 20 条、去重、最新在前）。列表每项渲染一条内容预览
-（该会话事件日志第一条真实用户输入：kind 'user' 或本插件署名的 QQ 消息优先，缺失时回退任何 user/message；
-提取全部 text 块拼接、剥去 QQ 入站的 <user_message> 包裹与拼接在边界外的可信前缀（[受限用户:仅问答] / [HH:MM 昵称(QQ)]，包裹不完整或空正文则原样回退）后换行折叠、按码点截断 ≤40 字，emoji 不拆半；找不到用户输入显示「（无对话内容）」）、
-建立时间（会话 header 的 createdAt，取不到则省略）、退休时间与截短 id（前 8+…+后 8 字符，保留两侧便于辨认）。
-预览经 sessionPersistence 的 read handle 冷读日志前 24 个事件取得（不开写所有权，读完即 close）；单会话日志
-缺失/损坏/读取失败只降级该项为「（内容不可读）」，其余项与切回功能不受影响。切换成功后目标会话解除退休
-标记，重启 resume 与空闲淘汰后的再激活都走常规路径找回它；切回目标 resume 失败时该 id 立即硬退休并移出列表，
-chat 回退到下一条消息新建会话，不会卡死。损坏（碰撞/恢复失败）退休的会话绝不进列表、不可切回。
-序号选择基于命令输出列表的快照，5 分钟内有效（过期提示重新查看）；纯数字参数仅在有对应有效列表时
-按序号解释，否则维持原参数语义。例外：`/permission` 的纯数字序号不落快照，每次现场取宿主 available 列表解释（1/2），越界或不可解析时回退用法提示。未知斜杠命令默认拦截并提示相近命令，配置 `unknownCommand: passthrough`
-可改为透传给模型。
-
-## 安全编辑（code_safe_edit）
-
-受守卫的宿主文件编辑由**独立插件 dsh-safe-edit** 提供（`~/dsh-plugins/dsh-safe-edit/`，2026-08-18 从本插件拆出，对所有通道全局注册）。三个工具：
-思路借鉴 [irmia_devkit_open](https://github.com/irmia2026/irmia_devkit_open) 的 safe_edit（AGPL-3.0，独立 TypeScript 清洁实现）。工具与边界见 dsh-safe-edit 仓库/说明：
-
-- `code_safe_edit`：read → 路径白名单 → **自动备份** → 匹配（精确 → 剥行号前缀 → 空白对齐/Aider 式）→ 替换 → 语法检查（js/cjs/mjs 走 `node --check`）→ **失败自动回滚**
-- `code_safe_rollback` / `code_list_backups`
-- 边界随会话 sandbox 策略：`danger-full-access` 无限制、`workspace-write` 限会话工作区、`read-only` 拒绝；无策略服务回落 `safeEditRoot`（默认 `/Users/mario/workspace`）
-- 模型可优先使用此工具（`code-safe-edit` skill 全渠道引导；QQ 平台提示词引导内置 read/edit 惯例，不绑定具体工具名）
-
-## 分段发送（qq_send_segments）
-
-`qq_send_segments` 工具让模型向当前 QQ 会话按顺序发送多条**独立的纯文本气泡**（每段一条单独消息），用于明确需要分条呈现的内容（如分步骤说明、清单）：
-
-- 参数 `segments`：字符串数组，**1–9 段**，每段 **≤500 字**且不能为空；按数组顺序逐条发送；
-- 可选参数 `chat_id`：目标会话（`private:<QQ号>` 或 `group:<群号>`），省略时发当前会话；
-- 不自动分段——普通回复直接输出文本即可（走既有的 t2i 卡片/自动分段路径），仅模型明确需要分条时才用；
-- 呼吸感（0.9.10 起）：相邻两段的发送间隔由插件配置 `segments.intervalMs` 控制（0–3000，默认 `0` = 不等待），工具的可选参数 `intervalMs` 可按次覆盖（同样截断到 0–3000）；插件页开关 `segments.enabled`（默认 `true`）置 `false` 后本工具下线；
-- 主动写操作，受 `actionRatePerMinute` 闸约束。
-
-## dm / group 访问策略（初始化必选）
-
-私聊（`dmPolicy`）与群聊（`groupPolicy`）各自三选一，选项含义如下：
-
-| 选项 | dmPolicy（私聊） | groupPolicy（群聊） |
-|---|---|---|
-| `open` | **仅管理员**可私聊（adminUsers/`ONEBOT_ALLOWED_USERS`；设 `allowAllUsers: true` 则所有人可） | **所有群**可聊（群内消息受 `requireMention` 控制：需 @ 或回复机器人的消息才触发；群成员带 [受限用户:仅问答] 软限制） |
-| `allowlist` | 仅 **`allowFrom`** 白名单 QQ 可私聊（不要求是管理员） | 仅 **`groupAllowFrom`** 白名单群可聊 |
-| `disabled` | 私聊全部拒绝 | 群聊全部拒绝 |
-
-**初始化建议**：
-- 只想自己用 → `dmPolicy: open` + 配好 `adminUsers`（私聊只有你能发）；
-- 想开放给几个熟人 → `dmPolicy: allowlist` + `allowFrom: ['QQ1','QQ2']`；
-- 群聊专用机器人 → `groupPolicy: open`（配合默认 `requireMention: true`，群成员需 @ 才触发）；
-- 只允许特定群 → `groupPolicy: allowlist` + `groupAllowFrom`。
-
-## 群聊权限分档与 ask_user_question 桥接（0.9.11）
-
-### 群聊权限分档
-
-群成员分「管理员 / 成员」两档（按 `adminUsers` 白名单判定），三处生效：
-
-1. **role 前缀档位**：每条群消息的 `[HH:MM 昵称(QQ)]` 前缀会标注发言人档位（·管理员 / ·成员），模型据此分辨消息来源，无需信任消息正文自带的身份声明。受限用户（`restrictedMemberPrefix`，默认开）仍额外带 `[受限用户:仅问答]` 前缀。
-2. **`permissions.memberTools`（默认 `none`）**：成员档位的回合中，全部 `qq_*` 工具调用被插件直接拒绝（硬拦截，不依赖模型自觉）；设为 `all` 则不限。缺省配置 fail-closed 为 `none`；无 QQ 会话映射的调用方（Web 等其他通道）不受此档位约束。管理员不受影响。
-3. **`agentPresetGroup`（默认空）**：群聊会话独立的 agent 预设 id（粗档）——设置后群聊会话优先使用它（可给群聊配更收敛的模型/预设），私聊仍用 `agentPreset`；留空=群私同源。`/preset` 的 per-chat 覆盖仍最优先。
-
-### ask_user_question QQ 桥接
-
-模型调用 `ask_user_question` 时，问题不再只发到 Web——插件把问题渲染成 QQ 选项卡（【❓ 提问】头行 + 选项编号/字母列表），群友回复即可作答：
-
-- **回复选项**：`1`、`a` 等编号或字母选择（多选用逗号分隔；纯编号选择仅单题卡片支持，多题请用下一种方式）；
-- **自由回答**：`答:内容`（或 `answer:内容`，全/半角冒号均可）——整批问题共用一份回答；
-- **放弃**：回复 `跳过`（或 `skip`），整批按空选择结算。
-
-群聊开启 `requireMention`（默认开启）时，回复必须 @机器人，例如 `@机器人 1`、`@机器人 答:内容`、`@机器人 跳过`，不 @ 的消息过不了提及检查。私聊和 `requireMention: false` 的群不用 @，但开头 @ 别人的消息不算作答。引用选项卡回复不算作答，会落回普通对话。
-
-结算时机：等待期内（前台等待阶段）回复**即时结算**，答案立刻回传给正在等待的模型回合；默认等待 300 秒后超时转 **pending**——此时工具返回 pending 而非失败，模型可继续做其他工作，群友之后回复仍可补答（pending 问题 15 分钟内有效）。问题卡过期清理，答案拦截失败的消息会原样落回普通对话，不吞消息。
-
-## t2i 字体依赖
-
-文字图卡片需要三类字体（CJK / 等宽 / 彩色 emoji），插件启动时从系统与固定路径自动注册，
-缺失时对应字符渲染为豆腐块。
-
-- **macOS**：零安装——自动使用系统自带 Hiragino Sans GB / Songti SC、Menlo、Apple Color Emoji。
-- **Linux**（Debian/Ubuntu，一条命令补齐）：
-
-  ```sh
-  sudo apt install fonts-noto-cjk fonts-dejavu-core fonts-noto-color-emoji
-  ```
-
-  | 依赖 | 提供文件（插件自动注册路径） | 用途 |
-  |---|---|---|
-  | `fonts-noto-cjk` | `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` | 中文正文/标题（ttc 自动提取 SC 面，回退 JP/Mono 面） |
-  | `fonts-dejavu-core` | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` | 代码块/行内 code 等宽 |
-  | `fonts-noto-color-emoji` | `/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf` | 彩色 emoji |
-  | 可选 `fonts-wqy-zenhei` / `fonts-wqy-microhei` | `/usr/share/fonts/truetype/wqy/*.ttc` | CJK 备选（Noto 缺失时） |
-  | 可选 `fonts-unifont` | `/usr/share/fonts/opentype/unifont/*.otf` | 最后兜底 |
-
-- **自定义**：`fontFiles` 指定额外字体文件（重启生效）；`fontFamilies` 指定优先使用的家族名；`monoFamilies` 单独指定代码文本优先使用的等宽家族名（优先于 `fontFamilies` 与平台默认）。
-  渲染器带墨水自检——缺字体的家族会被自动剔除并回退，不会静默出豆腐块卡片。
-- **Windows 中文自动候选**：Windows 上无需配置 `fontFiles`——渲染器自动加载系统字体并按平台候选链兜底：中文正文依次尝试 微软雅黑（Microsoft YaHei / YaHei UI）、宋体（SimSun）、黑体（SimHei）、等线（DengXian）、楷体（KaiTi）、仿宋（FangSong）；等宽/代码依次尝试 Consolas、Cascadia Code、Cascadia Mono、Courier New（可用 `monoFamilies` 把 Cascadia Code 等提到最前）。macOS 同理（Hiragino Sans GB / Songti SC 等自动候选）；Linux 仍建议安装 Noto CJK 并按需配 `fontFiles`。
-
-## 权限与数据
-
-- **网络**：与 OneBot 11 网关建立 WebSocket 连接（reverse 监听或 forward 拨出）；入站图片/文件从 QQ CDN 下载。
-- **文件**：入站媒体与会话映射写入 `<dsh-home>/media/onebot/`（`mediaDir`，6 小时过期清理）；会话数据由 dsh 宿主持久化。
-- **系统调用**：语音转写调用本机 ffmpeg 与 whisper CLI（可 `sttEnabled: false` 关闭）。
-- **敏感信息**：`accessToken` 与管理员白名单存于 dsh 配置，不写入日志；出站内容经敏感信息审计。
-- **不收集**：无遥测，除用户配置的 OneBot 网关与图片 CDN 外不调用任何第三方服务。
-
-## 给模型的平台说明（自动注入）
-
-- QQ 不渲染 Markdown → 输出纯文本（编号/短横线列表、行内反引号）。
-- 发图/文件/语音/视频用 `qq_send_*` 工具；合并转发用 `qq_send_forward`；确需分条呈现时用 `qq_send_segments`（1–9 段、每段 ≤500 字），普通回复直接输出文本。
-- 用户发来的图片/语音/视频在文本中标注为 `[图片]`/`[语音]`/`[视频]`；图片和视频解析成功后带本地路径，引用图片同样处理。无可用看图工具时如实告知用户。
-- 群聊消息带 `[HH:MM 昵称(QQ)·档位]` 前缀（0.9.11 起标注发言人档位：·管理员/·成员，由插件按管理员白名单标注，被 @ 时带 `[@我]`）；受限用户消息带 `[受限用户:仅问答]` 前缀（仅回答，禁止文件/终端/配置操作）。
-- 需要向用户确认或让其选择时调用 `ask_user_question`：QQ 会把问题渲染成选项卡，用户回复选项后答案自动回传（用户长时间未答会收到 pending，可继续其他工作）。
-- 本通道为 QQ，宿主无 Web 审批卡：**禁止调用 `exit_plan_mode`**（其确认卡仅 Web 端可用，会阻塞对话）。若处于计划模式，把计划写成纯文本发给用户，并提示「审阅后发 /plan off 退出」。
-- 斜杠命令由插件拦截（19 个，默认仅管理员；`/help` 群友可见成员视图）；未知斜杠命令默认拦截并提示相近命令，配置 `unknownCommand: passthrough` 时透传给模型；非 `/纯单词` 开头的文本（如路径）仍正常交给模型。
-- 修改宿主文件走内置 read/edit（行级 hash 锚点、dsh-better-edit 自动 undo），勿用 write 整文件覆盖（清空 undo 历史）。
-
-## 卸载
-
-1. 从 `~/.dsh/profiles/<profile>/cordis.patch.yml` 删除 dsh-onebot 的 insert 条目；
-2. 重启 dsh，日志不再出现 `[dsh-onebot] mounted` 即卸载完成；
-3. 可选：删除插件目录与 `<dsh-home>/media/onebot/` 残留媒体。
-
-## 开发
-
-```sh
-./scripts/build.sh                 # 编译 src/ → lib/
-./node_modules/.bin/vitest run     # 306 个测试：单元 + 真实 WS 对端 + 全管线
-```
-
-要点（来自移植源 DEVLOG 的教训）：
-
-- **CQ 反转义**：NapCat 会把 URL 里的 `&` 转成 `&amp;`，下载前必须反转义（CDN 403 的根因）。
-- **@ 检测 fail-closed**：不知道机器人 QQ 时，群消息一律视为未 @，不自动回复。
-- **断线即失败 pending**：WS 断开时立即 reject 所有未完成 action，避免 10-30s 干等与泄漏。
-- **重连去重**：并发断线只允许一个重连任务，防止双 WS 连接。
-- **int(target) 兜底**：chat_id 解析进 try/catch，坏目标不能炸掉宿主。
-- **临时媒体 6h 过期清理**：只写不删会无限堆积。
-- **t2i 按码点迭代**：JS 字符串索引会拆开 emoji 代理对（高代理位被分类成 CJK → 渲染成黑色字形），绘制/测量必须用 `Array.from`/for...of。
-- **t2i 度量=绘制**：换行/列宽统一走 `segWidth`（胶囊/粗体/斜体附加宽），像素级右缘验证 ≤790（非白判定 `not(r>245&&g>245&&b>245)`）。
-
-## 故障排查
-
-| 症状 | 原因与处理 |
-|---|---|
-| 群聊不响应 | `requireMention: true` 时需 @ 或回复机器人的消息才触发；确认 botQQ 已从事件学习或显式配置。仅靠引用触发还需 `get_msg` 能确认原作者是机器人；原消息不存在或查询失败时，可显式 @机器人 |
-| 图片下载 403 | NapCat 会把 URL 中的 `&` 转成 `&amp;`（解析已自动反转义）；仍失败可查日志中 media 下载行 |
-| 文件接收失败 | 非本机部署 NapCat 时需开启「文件转 URL」开关，否则 get_file 返回容器内路径不可达；确认 dsh 与 NapCat 网络互通 |
-| 文字图中文豆腐块 | Linux 未装 CJK 字体：`apt install fonts-noto-cjk`，并用 `fontFiles` 指定 SC 字体文件 |
-| 崩溃循环 / 工具注册冲突 | 同一插件文件被 insert 两次（双实例）——检查 patch 无重复条目 |
-| 语音一直只有 [语音] 占位、没有转写补递 | ffmpeg 或 whisper 不可用，或转写超时：安装后重启、调大 `sttTimeoutMs`，或 `sttEnabled: false` 关闭 |
-| 插件挂载失败 / peer 依赖解析失败 | 部署副本缺完整 node_modules 链接集：只复制 `lib/` 不够，运行时 peer 依赖 `@deepseek-ai/*` 需经 `scripts/link-host.sh` 链接到宿主安装；插件入口会 fail-loud 显式报「peer 依赖解析失败」，按报错补齐链接集后重启 |
-| `build.sh` 报 `cannot locate the dsh install` | 宿主无 `dsh` 在 PATH（如 fnOS 应用形态）且未找到 npx store：设 `DSH_ROOT=<宿主 node_modules 路径>` 后重跑 `./scripts/build.sh`（该目录下须有 `@deepseek-ai/`，设错路径会显式报错而非静默回退） |
-| 改了设置页 / patch 但不生效 | 按顺序排查：① 确认改的是**被监视的文件**——profile 层 `<DSH_HOME>/profiles/web/cordis.patch.yml` 或 home 层 `<DSH_HOME>/cordis.patch.yml`（仓库 patch 模板、部署副本、bundle 自带 patch 均不被监视，需同步到上述文件）；② 内容须真的变化（touch 同内容文件是 no-op）；③ 看宿主日志有无激活失败——insert 新增条目激活失败（如 peer 缺失）会显式报错、条目失活，等待重启重试；④ 设置页的持久层是 profile 层 `dsh-onebot` 覆盖行，改到别处（如已被宿主废弃改名的 settings.yaml）不会生效 |
-| 日志在哪 | dsh 宿主日志；插件历史根因与修复见 [DEVLOG.md](DEVLOG.md) |
-| 凭参考号查故障全过程 | 任何 `⚠️` 错误提示/连接故障日志尾部的参考号（`MF-…` 消息类 / `QQ-CONN-…` 连接类）都可在 `mediaDir/qq-trace.jsonl` 中检索：`grep <参考号> mediaDir/qq-trace.jsonl` 即列出该次故障的全部决策事件（stage/reason/耗时/traceId）。也可在 QQ 里发 `/doctor` 查看「最近故障参考号」节（含每号的 traceId 与阶段），或 `/doctor export <参考号>` 导出文件名含该号的脱敏诊断包离线分析。参考号仅在故障事件生成，正常流量零开销，不含用户消息正文 |
-
-## 开发记录
-
-完整时间线/根因/修复见 [DEVLOG.md](DEVLOG.md)（移植自 Hermes onebot 插件的 DEVLOG 惯例）。
-
-## License
-
-BSD-3-Clause
-
+保留的独立验证脚本为 verify:injected-context（验证宿主持久化的消息来源，并非已删除的文件事件注入）和 verify:lan-management（网络管理入口验证）。

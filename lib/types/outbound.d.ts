@@ -13,6 +13,8 @@ export interface OutboundSegment {
  * segments before the wire; non-text segments pass untouched.
  */
 export declare function filterBlankTextSegments(segments: OutboundSegment[]): OutboundSegment[];
+/** Strip ACP transport metadata without the upstream's broader reply rewriting. */
+export declare function stripAcpNoise(text: string): string;
 /** Options for an explicit outbound send (from tools). */
 export interface SendOptions {
     replyTo?: string;

@@ -256,6 +256,7 @@ describe('heartbeat pong watchdog', () => {
     removeAllListeners(): void
     close: (...args: unknown[]) => void
     ping: () => void
+    send: (data: string) => void
     terminate: () => void
     emit(event: string, ...args: unknown[]): void
   }
@@ -275,6 +276,7 @@ describe('heartbeat pong watchdog', () => {
       },
       close: vi.fn(),
       ping: vi.fn(),
+      send: vi.fn(),
       terminate: vi.fn(),
       emit(event, ...args) {
         for (const listener of [...(listeners.get(event) ?? [])]) listener(...args)
@@ -298,13 +300,14 @@ describe('heartbeat pong watchdog', () => {
     const warnSpy = vi.spyOn(console, 'warn')
 
     vi.advanceTimersByTime(30_000)
-    expect(socket.ping).toHaveBeenCalledTimes(1)
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ action: 'get_status', echo: 'dsh-onebot-heartbeat' }))
+    expect(socket.ping).not.toHaveBeenCalled()
     expect(socket.terminate).not.toHaveBeenCalled()
     expect(warnSpy).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(30_000)
     expect(socket.terminate).toHaveBeenCalledTimes(1)
-    expect(socket.ping).toHaveBeenCalledTimes(1) // the stale tick terminates instead of pinging again
+    expect(socket.send).toHaveBeenCalledTimes(1) // the stale tick terminates instead of probing again
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(String(warnSpy.mock.calls[0]?.[0])).toContain('mode=reverse')
     expect(String(warnSpy.mock.calls[0]?.[0])).toContain('75000ms')
@@ -328,6 +331,11 @@ describe('heartbeat pong watchdog', () => {
 
     current.emit('pong')
     expect(privateConnection.lastPongAt).toBe(atAttach + 5_000) // the current socket does refresh
+    vi.setSystemTime(atAttach + 10_000)
+    stale.emit('message', '{}')
+    expect(privateConnection.lastPongAt).toBe(atAttach + 5_000)
+    current.emit('message', JSON.stringify({ echo: 'dsh-onebot-heartbeat', status: 'ok', data: {} }))
+    expect(privateConnection.lastPongAt).toBe(atAttach + 10_000)
   })
 })
 
