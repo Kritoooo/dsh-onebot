@@ -31,6 +31,7 @@ vi.mock('../src/bridge.js', () => ({
     async handleInbound(event: unknown): Promise<void> {
       pokeInbound.push(event)
     }
+    handleNotice(_event: unknown): void {}
   },
 }))
 

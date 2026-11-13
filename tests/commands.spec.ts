@@ -16,7 +16,7 @@ import { makeCmdHarness } from './helpers/bridge-harness.js'
 
 describe('commands', () => {
   it('packageVersion resolves the fork version under ESM (no "?")', () => {
-    expect(packageVersion()).toBe('0.9.19-kirito.3')
+    expect(packageVersion()).toBe('0.9.19-kirito.9')
   })
 
   it('routes slash commands before the model: /new opens a fresh session', async () => {

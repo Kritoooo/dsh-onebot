@@ -29,6 +29,7 @@ export interface CommandChatView {
         sentAt: number;
     }>;
     pendingTurnRoles: UserRole[];
+    pendingTurnProactive?: boolean[];
 }
 export interface CommandContext {
     sendToChat(chatId: ChatId, text: string): Promise<string[]>;

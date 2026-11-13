@@ -1,8 +1,10 @@
 # dsh-onebot
 
+`0.9.19-kirito.9`：新增默认关闭的主动群聊。只使用原生决策模型，支持 TypeSafe、OpenRouter Decisions、Vercel TypeSafe-compatible 和自定义 System One 兼容端点；首次启用默认只判断不发送。支持随沉默时间降低接话价值阈值，并向两个模型同步机器人名字、QQ 号、QQ 昵称及群昵称；QQ 昵称优先取自身真实个人资料，成功查询缓存 6 小时。配置、群聊上下文、权限和上线步骤见 [主动群聊说明](docs/proactive-group-replies.md)。
+
 > **[English](README.en.md) | 中文**
 
-给 dsh（DeepSeek Harness）提供 QQ 通道的 OneBot 11 插件，支持 SnowLuma、NapCat 等协议端。当前 fork 版本为 **0.9.19-kirito.3**。
+给 dsh（DeepSeek Harness）提供 QQ 通道的 OneBot 11 插件，支持 SnowLuma、NapCat 等协议端。当前 fork 版本为 **0.9.19-kirito.9**。
 
 用户消息经 QQ 网关进入插件，再交给对应聊天的 dsh Agent；模型回复经插件转换为 QQ 消息。插件负责连接、消息转换与通道访问控制，模型、预设和工作区通过宿主管理或插件配置选择。
 

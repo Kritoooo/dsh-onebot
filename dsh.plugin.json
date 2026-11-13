@@ -1,6 +1,6 @@
 {
   "id": "dsh-onebot",
-  "version": "0.9.19-kirito.3",
+  "version": "0.9.19-kirito.9",
   "main": "./lib/index.js",
   "description": "QQ bot channel for dsh via OneBot 11 (NapCat et al.): reverse/forward WebSocket, DM+group with allowlists and mention gating, image/voice inbound, sentence-split long replies, [[qq_forward]], whitelisted NapCat API proxy",
   "engines": {

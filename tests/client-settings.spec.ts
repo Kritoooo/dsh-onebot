@@ -174,7 +174,7 @@ describe('T4 客户端 bundle — 四组 25 键（分组/键集/默认值 = T1 �
     expect(client.GROUP_KEYS).toEqual(SETTINGS_GROUPS)
     expect(groups.map((group) => group.id)).toEqual(['connection', 'permissions', 'behavior', 'diagnostics'])
     expect(allFields.map((field) => field.key).sort()).toEqual([...ALL_KEYS].sort())
-    expect(allFields).toHaveLength(25) // T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
+    expect(allFields).toHaveLength(26) // T2 26→27（newMessagePolicy）、T9 27→28（autoSteerPolicy）、T3 28→29（deferredTimeoutMs）
   })
 
   it('默认值逐字对齐 host SCHEMA_DEFAULTS（重置按钮唯一来源）', () => {
@@ -232,7 +232,7 @@ describe('T4 客户端 bundle — 渲染函数模块级可测（renderGroup 纯�
     const titles = sections.map((section) => ((section.children[0] as StubElement).children[0] as string))
     expect(titles).toEqual(['连接', '权限', '行为', '诊断'])
     const fieldRows = sections.flatMap((section) => walk(section).filter((element) => element.type === 'div' && element.props.className === 'obx-field'))
-    expect(fieldRows).toHaveLength(25)
+    expect(fieldRows).toHaveLength(26)
   })
 
   it('控件类型齐备：4 枚举下拉 + 3 多行文本 + 11 布尔勾选 + 5 文本框 + 1 密码框（secret 另含清除勾选）', () => {
@@ -243,7 +243,7 @@ describe('T4 客户端 bundle — 渲染函数模块级可测（renderGroup 纯�
     expect(selects).toHaveLength(6) // 5 原有枚举（mode/dmPolicy/groupPolicy/unknownCommand/newMessagePolicy）+ T9 autoSteerPolicy
     expect(textareas).toHaveLength(3)
     expect(inputs.filter((input) => input.props.type === 'checkbox')).toHaveLength(7 + 1) // 7 retained booleans + clear-secret checkbox
-    expect(inputs.filter((input) => input.props.type === 'text')).toHaveLength(8) // host/port/url/botQQ/workspacePath（W7）+ interimRecallMs/rateLimitPerMinute + T3 deferredTimeoutMs（number 以文本框渲染）
+    expect(inputs.filter((input) => input.props.type === 'text')).toHaveLength(9) // 新增机器人名字文本框
     expect(inputs.filter((input) => input.props.type === 'password')).toHaveLength(1)
   })
 
@@ -456,7 +456,7 @@ describe('W7 workspacePath + 「快速填入 workspace」（connection 组新行
 
   it('connection 组追加 workspacePath：键序组尾、中文 label、hint 申明新会话生效与 /workspace 覆盖不受影响', () => {
     const connection = groups.find((group) => group.id === 'connection')!
-    expect(connection.fields.map((field) => field.key)).toEqual(['mode', 'host', 'port', 'url', 'accessToken', 'botQQ', 'workspacePath'])
+    expect(connection.fields.map((field) => field.key)).toEqual(['mode', 'host', 'port', 'url', 'accessToken', 'botQQ', 'botName', 'workspacePath'])
     const workspaceField = connection.fields.find((field) => field.key === 'workspacePath')!
     expect(workspaceField.type).toBe('string')
     expect(workspaceField.label).toMatch(/\p{Script=Han}/u)
@@ -554,7 +554,7 @@ describe('W7 workspacePath + 「快速填入 workspace」（connection 组新行
         field.key === 'workspacePath' ? renderPicker(stubReact, pickerOpts({ selectedId: 'ws-1' })) : null,
     }))
     // 附加行渲染在 workspacePath 之后（connection 组最后一个字段行后），字段行计数不受影响。
-    expect(withPicker.filter((element) => element.props.className === 'obx-field')).toHaveLength(7)
+    expect(withPicker.filter((element) => element.props.className === 'obx-field')).toHaveLength(8)
     expect(withPicker.filter((element) => element.props.className === 'obx-workspace-row')).toHaveLength(1)
   })
 })

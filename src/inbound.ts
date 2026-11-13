@@ -170,6 +170,9 @@ export interface InboundContext {
    * itself) bypass the mute and the unlock can never be swallowed. Optional:
    * absent = the host has no silencing wiring (pre-T3 behavior). */
   isSilenced?(chatId: ChatId): boolean
+  /** Passive observation after access and verified-quote gates, before mention drops. */
+  observeGroup?(inbound: NormalizedInbound, direct: boolean): void
+  onGroupDispatched?(inbound: NormalizedInbound): void
   /** Message body assembly (bridge facade: overridable, see the pipeline-order test). */
   buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>
   /** Quote expansion via the overridable bridge facade; a verified response
@@ -301,6 +304,7 @@ export class InboundPipeline {
         }
       }
     }
+    if (kind === 'group') this.ctx.observeGroup?.(inbound, mentioned || !this.ctx.config.requireMention)
     if (kind === 'group' && this.ctx.config.requireMention && !mentioned) {
       this.ctx.log('debug', mentionDropReason + ': ' + groupId)
       currentTrace()?.emit('mention', { ok: false, reason: mentionDropReason })
@@ -397,9 +401,11 @@ export class InboundPipeline {
     const plain = inbound.media.length === 0 && inbound.replyId === undefined && inbound.forwardId === undefined
     if (this.ctx.interceptBusyTurn !== undefined
       && await this.ctx.interceptBusyTurn(chatId, final, role, nickname, plain)) {
+      if (kind === 'group') this.ctx.onGroupDispatched?.(inbound)
       return
     }
     await this.ctx.dispatchFollowup(chatId, final, role, nickname)
+    if (kind === 'group') this.ctx.onGroupDispatched?.(inbound)
   }
 
   /** W2-②: (chatId, message_id) sliding-window dedup against OneBot

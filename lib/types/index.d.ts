@@ -16,6 +16,7 @@ import type { SessionStore } from '@deepseek-ai/dsh-session';
 import type { ModelSelection } from '@deepseek-ai/dsh-agent';
 import type Z from '@deepseek-ai/schemastery';
 import type { OneBotEvent } from './connection.js';
+import type { ProactiveConfig } from './proactive.js';
 type Context = CordisContext & {
     tools: ToolRuntime;
     systemPrompt: SystemPrompt;
@@ -85,6 +86,8 @@ export declare const name = "dsh-onebot";
 export declare const inject: string[];
 /** Plugin configuration (validated by schemastery). */
 export interface Config {
+    proactive: ProactiveConfig;
+    botName: string;
     mode: 'reverse' | 'forward';
     host: string;
     port: number;

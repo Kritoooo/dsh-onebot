@@ -20,9 +20,10 @@ import type { Transcriber } from './stt.js'
 import { transcriptLabel } from './stt.js'
 import type { MediaRef } from './cq.js'
 import type { ChatId, UserRole } from './chat.js'
-import { buildChatId, classifyUserRole, splitChatId } from './chat.js'
+import { buildChatId, classifyUserRole, groupAllowed, splitChatId } from './chat.js'
 import type { AccessPolicyConfig } from './chat.js'
 import { buildPlatformPrompt } from './prompt.js'
+import { BotIdentity } from './identity.js'
 import { registerTools } from './tools.js'
 import { tryHandleCommand as routeCommand, STEER_ACCEPTED_NOTICE, type CommandContext } from './commands.js'
 import { resolveNoticeText, type NoticeTexts } from './notices.js'
@@ -43,6 +44,8 @@ import type { HealthDeps } from './health.js'
 import { FailureRefRegistry, failureRefSuffix } from './ref.js'
 import type { FailureRefKind } from './ref.js'
 import type { TraceStage } from './trace.js'
+import { ProactiveReplies, PROACTIVE_DEFAULTS } from './proactive.js'
+import type { ProactiveConfig, ProactiveTurn } from './proactive.js'
 /** T2 (P1): the queue notice sent to a chat when a message arrives while its
  * task is running under the default 'queue' policy — at most ONE per running
  * turn (the flag resets at turn/end) so a burst of queued messages never
@@ -51,7 +54,9 @@ export const QUEUE_NOTICE_TEXT = '⏳ 当前任务运行中，新消息已排队
 
 /** Resolved runtime configuration for the bridge. */
 export interface BridgeConfig {
+  proactive?: ProactiveConfig
   botQQ: string
+  botName?: string
   ignoreSelf: boolean
   requireMention: boolean
   /** Unknown slash-command handling (R1): 'intercept' (default) consumes the
@@ -247,6 +252,8 @@ export class ChatBridge {
   /** Interim domain (D1-PR5): the assistant/message interim routing, the
    * per-message recall timers and the turn/end settlement. */
   private readonly interim: InterimTracker
+  private readonly proactive: ProactiveReplies
+  private readonly identity: BotIdentity
   /** T3 (P2): the deferred-delivery tracker (超时补发) — timeout timers, the
    * JSONL registry, bounded send retries and restart recovery. */
   private readonly deferred: DeferredDelivery
@@ -287,6 +294,8 @@ export class ChatBridge {
 
   constructor(deps: BridgeDeps) {
     this.deps = deps
+    this.identity = new BotIdentity(deps.config, () => deps.connection.selfId || deps.config.botQQ,
+      (action, params) => this.connectionCall(action, params))
     this.registry = new ChatRegistry({
       agents: deps.agents,
       sessions: deps.sessions,
@@ -298,6 +307,7 @@ export class ChatBridge {
       log: (level, message) => deps.log(level, message),
       isStopping: () => this.stopping,
       onChatRemoved: chat => {
+        this.proactive?.reset(chat.chatId)
         this.stopTyping(chat)
         this.traceByChat.delete(chat.chatId)
         this.queueNoticeChats.delete(chat.chatId)
@@ -321,10 +331,42 @@ export class ChatBridge {
         sink.emit({ traceId: mapped ?? newTraceId(sink.now()), chatId, ...event })
       },
     })
+    this.proactive = new ProactiveReplies({
+      identity: this.identity,
+      config: deps.config.proactive ?? PROACTIVE_DEFAULTS,
+      mediaDir: deps.config.mediaDir,
+      allowed: chatId => !this.stopping && this.connected && groupAllowed(splitChatId(chatId).target, deps.policy)
+        && !(this.silentUntil.get(chatId)! > Date.now()),
+      busy: chatId => {
+        const chat = this.chats.get(chatId)
+        return chat !== undefined && (chat.busy || chat.agent.status === 'running' || chat.pendingTurnRoles.length > 0)
+      },
+      dispatch: async (turn, text) => {
+        await this.ensureChat(turn.chatId, turn.target.nickname)
+        if (!this.proactive.valid(turn)) return false
+        await this.dispatchFollowup(turn.chatId, text, 'member', turn.target.nickname, turn)
+        return true
+      },
+      cancelRunning: chatId => {
+        const chat = this.chats.get(chatId)
+        if (chat?.activeTurnProactive && chat.agent.status === 'running') chat.agent.cancel({ kind: 'user' })
+      },
+      send: (chatId, text, guard) => this.outbound.sendProactive(chatId, text, guard),
+      log: (level, message) => deps.log(level, message),
+    })
     this.inbound = new InboundPipeline({
       call: (action, params) => this.connectionCall(action, params),
       selfId: () => this.deps.connection.selfId,
       policy: deps.policy,
+      observeGroup: (inbound, direct) => {
+        const self = this.deps.connection.selfId || this.deps.config.botQQ
+        if (inbound.userId === self) {
+          if (inbound.messageId !== undefined) this.proactive.recordBot(inbound.chatId, inbound.messageId, inbound.text)
+          return
+        }
+        this.proactive.observe(inbound, direct)
+      },
+      onGroupDispatched: inbound => this.proactive.markProvided(inbound),
       getChat: chatId => this.chats.get(chatId),
       sweepIdleChats: () => this.registry.sweepIdleChats(),
       media: deps.media,
@@ -399,8 +441,10 @@ export class ChatBridge {
       void this.onSessionFlush(session)
     })
     connection.onStatus = (connected: boolean) => {
+      this.identity.clear()
       this.deps.log(connected ? 'info' : 'warn', 'OneBot ' + (connected ? 'connected' : 'disconnected'))
       if (connected) this.outbound.drainPendingSends()
+      else this.proactive.cancelAll()
     }
     this.registry.mappingLoaded = this.ready().then(async () => {
       await this.registry.loadRetired()
@@ -420,6 +464,7 @@ export class ChatBridge {
 
   /** Stop everything: dispose agents, save mapping, cancel timers. */
   async stop(): Promise<void> {
+    await this.proactive.stop()
     this.stopping = true
     if (this.sessionEventOff !== undefined) {
       this.sessionEventOff()
@@ -460,6 +505,8 @@ export class ChatBridge {
    * 'none' (members blocked).
    */
   memberToolsAllowed(sessionId: string | undefined): boolean {
+    const chatId = sessionId === undefined ? undefined : this.bySession.get(sessionId)
+    if (chatId !== undefined && this.chats.get(chatId)?.activeTurnProactive) return false
     if ((this.deps.config.permissions?.memberTools ?? 'none') === 'all') return true
     if (sessionId === undefined) return true
     return this.canEditFiles(sessionId)
@@ -505,7 +552,17 @@ export class ChatBridge {
    * @returns the sent message ids.
    */
   sendToChat(chatId: ChatId, text: string, options: SendOptions = {}): Promise<string[]> {
-    return this.outbound.sendToChat(chatId, text, options)
+    return this.outbound.sendToChat(chatId, text, options).then(ids => {
+      if (ids[0] !== undefined) this.proactive.recordBot(chatId, ids[0], text)
+      return ids
+    })
+  }
+
+  /** Recall notices only invalidate local speculative context; they do not dispatch turns. */
+  handleNotice(event: OneBotEvent): void {
+    if (event.notice_type === 'group_recall' && event.group_id !== undefined && event.message_id !== undefined) {
+      this.proactive.recall(buildChatId('group', String(event.group_id)), String(event.message_id))
+    }
   }
 
   /**
@@ -570,12 +627,16 @@ export class ChatBridge {
   }
 
 
-  private async dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void> {
+  private async dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string, proactive?: ProactiveTurn): Promise<void> {
+    await this.identity.resolve(chatId)
     const final = text.trim()
     const fallback = this.chats.get(chatId)?.lastNickname ?? ''
     const chat = await this.ensureChat(chatId, nickname ?? fallback)
+    if (proactive && (!this.proactive.valid(proactive) || chat.busy || chat.agent.status === 'running' || chat.pendingTurnRoles.length > 0)) {
+      throw new Error('主动回合已失效或显式请求优先')
+    }
     if (nickname !== undefined && nickname !== '') chat.lastNickname = nickname
-    chat.lastFollowup = text
+    if (!proactive) chat.lastFollowup = text
     chat.lastActivityAt = Date.now()
     // M3-D2a: a dispatched user turn starts a fresh interim cycle (the
     // inbound residue reset already cleared the loop fields directly).
@@ -584,14 +645,21 @@ export class ChatBridge {
     // the running turn's role (M1-A2). Push and followup happen synchronously,
     // so the role cannot interleave with another dispatch.
     chat.pendingTurnRoles.push(role)
-    this.deps.log('info', 'followup from ' + chatId + ': ' + final.slice(0, 120))
+    ;(chat.pendingTurnProactive ??= []).push(proactive !== undefined)
+    this.deps.log('info', 'followup from ' + chatId + ': ' + (proactive ? '[主动接话]' : final.slice(0, 120)))
     // Plugin-originated user message: the session log attributes QQ inbound
     // messages to this plugin's own producer-owned source kind, keeping them
     // distinguishable from host/web UI inputs.
-    chat.agent.followup(createUserMessage({
-      content: [{ type: 'text', text: final }],
-      source: { kind: 'plugin:dsh-onebot' },
-    }))
+    try {
+      chat.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: final }],
+        source: { kind: 'plugin:dsh-onebot' },
+      }))
+    } catch (error) {
+      chat.pendingTurnRoles.pop()
+      chat.pendingTurnProactive?.pop()
+      throw error
+    }
     // W1 cross-stream join: the turn's session events arrive on a different
     // async chain, so record this dispatch's traceId per chat for
     // onSessionEvent to pick up (runs inside the inbound ALS scope — command
@@ -868,14 +936,22 @@ export class ChatBridge {
       // (M1-A2): turns the plugin did not dispatch (host/web input) find an
       // empty queue and fail closed as member.
       chat.activeTurnRole = chat.pendingTurnRoles.shift() ?? 'member'
+      chat.activeTurnProactive = chat.pendingTurnProactive?.shift() ?? false
       chat.lastActivityAt = Date.now()
       chat.busy = true
       // T3 (P2): arm the deferred silent-wait window for this turn（每次模型
       // 输出重置；turn/end 解除；deferredTimeoutMs<=0 时为 no-op）。
-      this.deferred.onTurnStart(chatId, session.id)
+      if (chat.activeTurnProactive) this.proactive.startTurn(chatId)
+      else this.deferred.onTurnStart(chatId, session.id)
       return
     }
     if (event.type === 'assistant/message') {
+      if (chat.activeTurnProactive) {
+        const message = event.data.message
+        this.proactive.capture(chatId, message.content.filter(block => block.type === 'text').map(block => block.text).join(''),
+          message.content.some(block => block.type === 'tool-call'))
+        return
+      }
       // T3 (P2): a deferred-registered (timed-out) turn is muted — its text
       // messages are captured for the final补发 only（不插播 interim、不转
 
@@ -885,6 +961,16 @@ export class ChatBridge {
     }
     if (event.type === 'turn/end') {
       const reason = event.data.reason
+      if (chat.activeTurnProactive) {
+        chat.busy = false
+        chat.lastActivityAt = Date.now()
+        this.stopTyping(chat)
+        this.queueNoticeChats.delete(chatId)
+        void this.proactive.finish(chatId, reason.kind === 'completed')
+        void this.deps.sessions.flush(chat.agent.session).catch(() => this.deps.log('warn', '主动会话落盘失败'))
+        this.saveMappingDebounced()
+        return
+      }
       // T4 (P3): a message-turn fault mints ONE MF- reference before any
       // consumer runs — the trace event (data.ref), the structured log line,
       // the ⚠️ notice tail and the deferred terminal text all carry the same
@@ -1042,6 +1128,7 @@ export class ChatBridge {
    * the outbound pipeline since no agent is left to reply.
    */
   private async resetChat(chatId: ChatId): Promise<void> {
+    this.proactive.reset(chatId)
     await this.registry.resetChat(chatId)
     this.sendToChat(chatId, '✅ 已开启新会话，下一条消息将进入全新会话，旧对话历史保留在之前的会话中。').catch((error: unknown) => {
       this.deps.log('warn', 'reset notice send failed: ' + String(error))
@@ -1056,6 +1143,32 @@ export class ChatBridge {
    * not) push messages to QQ.
    */
   private installChannelScope(agentCtx: Context): void {
+    agentCtx.systemPrompt.section({
+      name: 'channel:bot-identity', order: 92, interpolate: false,
+      text: context => {
+        const id = context.agent?.session.id
+        const chatId = id === undefined ? undefined : this.bySession.get(String(id))
+        return chatId === undefined ? '' : this.identity.context(chatId)
+      },
+    })
+    if (this.deps.config.proactive?.enabled) {
+      agentCtx.systemPrompt.section({
+        name: 'channel:proactive-delivery', order: 91, interpolate: false,
+        text: context => {
+          const id = context.agent?.session.id
+          const chatId = id === undefined ? undefined : this.bySession.get(String(id))
+          return chatId === undefined || !chatId.startsWith('group:') ? '' : this.proactive.deliveryContext(chatId)
+        },
+      })
+      agentCtx.on('tools/pre-execute', async (exec, next) => {
+        const id = exec.agent?.session.id
+        const chatId = id === undefined ? undefined : this.bySession.get(String(id))
+        if (chatId !== undefined && this.chats.get(chatId)?.activeTurnProactive) {
+          return { kind: 'deny' as const, reason: '主动接话回合只生成最终文字，不调用工具' }
+        }
+        return next()
+      })
+    }
     agentCtx.systemPrompt.section({
       name: 'channel:dsh-onebot',
       order: 90,

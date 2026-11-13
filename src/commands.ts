@@ -33,6 +33,7 @@ export interface CommandChatView {
   loopPending: string | null
   loopBuffer: Array<{ id: string; text: string; sentAt: number }>
   pendingTurnRoles: UserRole[]
+  pendingTurnProactive?: boolean[]
 }
 export interface CommandContext {
   sendToChat(chatId: ChatId, text: string): Promise<string[]>
@@ -252,6 +253,7 @@ async function handleStopCommand(ctx: CommandContext, chatId: ChatId): Promise<v
   const chat = ctx.getChat(chatId)
   // Clear before awaiting the acknowledgement, even if sending it fails.
   if (chat !== undefined) chat.pendingTurnRoles.length = 0
+  if (chat !== undefined && chat.pendingTurnProactive !== undefined) chat.pendingTurnProactive.length = 0
   if (chat !== undefined && chat.agent.status === 'running') {
     chat.agent.cancel({ kind: 'user' })
     // Drop the deferred loop state so the cancelled turn settles silently

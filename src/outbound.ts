@@ -52,6 +52,8 @@ export function stripAcpNoise(text: string): string {
 /** Options for an explicit outbound send (from tools). */
 export interface SendOptions {
   replyTo?: string
+  /** Internal final-send check; evaluated at the last wire boundary. */
+  guard?: () => boolean
   /** Queue the send for resend on reconnect instead of failing while the
    * connection is down. Only for model final replies; interim sends carry
    * recall timers + bookkeeping and must never be replayed. */
@@ -449,6 +451,26 @@ export class OutboundPipeline {
     })
   }
 
+  /** One final text bubble, no forward/card/splitting and no reconnect queue. */
+  sendProactive(chatId: ChatId, text: string, guard: () => boolean): Promise<string | undefined> {
+    return this.enqueue(chatId, async () => {
+      if (!guard() || !this.ctx.connected()) return undefined
+      const clean = stripMarkdown(stripBoundaryLeakage(stripAcpNoise(text)))
+        .replace(/^\s*\[\[reply:[^\]]+\]\]\s*/, '').trim()
+      if (!clean || clean.includes('[[不回]]') || clean.includes('[[qq_forward')) return undefined
+      const reject = this.writeGateRejectReason(chatId, 'proactive_reply')
+      if (reject !== null) return undefined
+      try {
+        const id = await this.sendMsg(chatId, [{ type: 'text', data: { text: clean } }], { guard })
+        this.auditWrite(chatId, 'proactive_reply', id !== undefined, id === undefined ? '发送未确认' : '发送成功')
+        return id
+      } catch (error) {
+        this.auditWrite(chatId, 'proactive_reply', false, '发送失败，不补发')
+        throw error
+      }
+    })
+  }
+
   /** B8d: per-chat send chains owned by the pipeline (decoupled from the
    * registry's chat lifecycle — unregistered chats serialize too, the
    * original C6b ask). Entries clean themselves up once settled so evicted
@@ -475,6 +497,7 @@ export class OutboundPipeline {
 
   /** Send one message to a chat and return its message id. */
   async sendMsg(chatId: ChatId, segments: OutboundSegment[], options: SendOptions): Promise<string | undefined> {
+    if (options.guard && !options.guard()) return undefined
     const ref = splitChatId(chatId)
     const params: Record<string, unknown> = {}
     let target: number

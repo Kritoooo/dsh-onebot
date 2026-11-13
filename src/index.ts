@@ -21,6 +21,7 @@ import type { WorkspaceRegistryLike } from './bridge.js'
 import type { AccessPolicyConfig } from './chat.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { ProactiveConfig } from './proactive.js'
 
 // R1 部署加固：peer 依赖解析失败/关键模块缺失时必须显眼报错并 fail-loud，
 // 不能静默不挂载。静态 import 会在本模块任何代码运行之前就以晦涩的
@@ -40,6 +41,7 @@ let redactSnapshot: typeof import('./health.js').redactSnapshot
 let describeError: typeof import('./errors.js').describeError
 let configureSendSegments: typeof import('./tools.js').configureSendSegments
 let createPokeHandler: typeof import('./poke.js').createPokeHandler
+let PROACTIVE_DEFAULTS: typeof import('./proactive.js').PROACTIVE_DEFAULTS
 
 try {
   ;({ default: z } = await import('@deepseek-ai/schemastery'))
@@ -52,6 +54,7 @@ try {
   ;({ describeError } = await import('./errors.js'))
   ;({ configureSendSegments } = await import('./tools.js'))
   ;({ createPokeHandler } = await import('./poke.js'))
+  ;({ PROACTIVE_DEFAULTS } = await import('./proactive.js'))
 } catch (error) {
   console.error('[dsh-onebot] 挂载失败：peer 依赖解析失败或关键模块缺失 —— 部署副本必须带完整 node_modules 链接集（scripts/link-host.sh 产物），只复制 lib/ 不够。原始错误：' + (error instanceof Error ? error.message : String(error)))
   throw error
@@ -92,6 +95,8 @@ export const inject = ['tools', 'systemPrompt', 'agents', 'sessions', 'agentDefa
 
 /** Plugin configuration (validated by schemastery). */
 export interface Config {
+  proactive: ProactiveConfig
+  botName: string
   mode: 'reverse' | 'forward'
   host: string
   port: number
@@ -211,6 +216,32 @@ const OUTBOUND_IMAGE_MAX_BYTES = IMAGE_MAX_BYTES
 const INBOUND_FILE_MAX_BYTES = 20 * 1024 * 1024
 
 export const Config: Z<Config> = z.object({
+  proactive: z.object({
+    enabled: z.boolean().default(false).description('主动群聊回复总开关'),
+    shadow: z.boolean().default(true).description('影子模式：只调用决策模型并记录判断，不唤起回复模型或发送消息'),
+    groups: z.array(z.string()).default([]).description('主动回复群号白名单，仍受群聊访问策略约束；空列表不旁听'),
+    ignoredUsers: z.array(z.string()).default([]).description('不触发主动回复的 QQ 号，可填写其他机器人'),
+    botProfile: z.string().default(PROACTIVE_DEFAULTS.botProfile).description('供决策模型理解的昵称、人设和能力范围'),
+    quietMs: z.number().min(100).max(30_000).default(3_000),
+    waitMaxMs: z.number().min(100).max(30_000).default(8_000),
+    decisionIntervalMs: z.number().min(1_000).max(60_000).default(8_000),
+    cooldownMs: z.number().min(0).max(86_400_000).default(120_000),
+    hourlyLimit: z.number().min(1).max(100).default(6),
+    dailyLimit: z.number().min(1).max(1_000).default(30),
+    ttlMs: z.number().min(1_000).max(120_000).default(30_000),
+    addressedThreshold: z.number().min(0).max(1).default(0.85),
+    invitationThreshold: z.number().min(0).max(1).default(0.8),
+    valueThreshold: z.number().min(0).max(1).default(0.85),
+    silenceBoost: z.number().min(0).max(0.2).default(0.10).description('群聊持续活跃而机器人沉默时，接话价值阈值的最大降幅；0 关闭，下限 0.70'),
+    interruptionThreshold: z.number().min(0).max(1).default(0.2),
+    decision: z.object({
+      provider: z.union([z.const('typesafe'), z.const('openrouter'), z.const('vercel'), z.const('systemone')]).default('typesafe'),
+      endpoint: z.string().default('').description('原生决策 API 完整 HTTPS 端点；留空使用 provider 默认值'),
+      model: z.string().default('').description('决策模型 ID；留空使用 provider 的 Jev 默认值'),
+      apiKeyEnv: z.string().default('').description('凭据所在的环境变量名；此处不填写实际密钥'),
+      timeoutMs: z.number().min(100).max(30_000).default(1_500),
+    }).default(PROACTIVE_DEFAULTS.decision),
+  }).default(PROACTIVE_DEFAULTS).description('原生决策模型驱动的主动群聊；默认关闭，首次启用保持影子模式'),
   mode: z.union([z.const('reverse'), z.const('forward')]).default('reverse')
     .description('连接模式：reverse = NapCat ws-reverse 拨入（本插件监听端口）；forward = 本插件主动连接 NapCat 的 ws 服务'),
   host: z.string().default('127.0.0.1')
@@ -225,6 +256,7 @@ export const Config: Z<Config> = z.object({
     .description('forward 模式重连上限：连续失败达到该次数后放弃重连并打印恢复指引；0 = 无限重试（退避间隔封顶 60s）'),
   botQQ: z.string().default('')
     .description('机器人自身 QQ 号；留空则从 meta 事件自动学习'),
+  botName: z.string().max(64).default('').description('机器人称呼；留空自动读取当前群名片/昵称或 QQ 昵称，同时同步给回复模型与决策模型'),
   requireMention: z.boolean().default(true)
     .description('群聊是否仅在 @机器人（或回复其消息）时响应'),
   pokeEnabled: z.boolean().default(false)
@@ -473,7 +505,7 @@ export function apply(ctx: Context, config: Config): void {
   connection.onMeta = (event: OneBotEvent) => {
     logMetaEvent(connection.selfId, event, config.logLevel)
   }
-  connection.onNotice = createPokeHandler({
+  const onPoke = createPokeHandler({
     pokeEnabled: config.pokeEnabled,
     selfId: () => connection.selfId || config.botQQ,
     dispatch: event => {
@@ -482,6 +514,7 @@ export function apply(ctx: Context, config: Config): void {
       })
     },
   })
+  connection.onNotice = event => { bridge.handleNotice(event); onPoke(event) }
   // W2-②③ gate keys: BridgeConfig (bridge.ts) keeps its declared shape; the
   // pipelines read them off the runtime object via optional intersection
   // members (see InboundContext/OutboundContext.config), so the spread here
@@ -522,7 +555,9 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
     config: {
+      proactive: config.proactive,
       botQQ: config.botQQ,
+      botName: config.botName,
       ignoreSelf: config.ignoreSelf,
       requireMention: config.requireMention,
       unknownCommand: config.unknownCommand,

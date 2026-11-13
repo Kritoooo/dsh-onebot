@@ -67,7 +67,7 @@ export const REMOTE_EFFECT = 'restart'
  *  W7：connection 组追加 workspacePath（会话默认工作区；schema 已有该键
  *  src/index.ts:287，本批次起入面板白名单，键序追加在组尾）。 */
 export const SETTINGS_GROUPS: Readonly<Record<string, readonly string[]>> = {
-  connection: ['mode', 'host', 'port', 'url', 'accessToken', 'botQQ', 'workspacePath'],
+  connection: ['mode', 'host', 'port', 'url', 'accessToken', 'botQQ', 'botName', 'workspacePath'],
   permissions: ['requireMention', 'adminUsers', 'dmPolicy', 'groupPolicy', 'allowAllUsers', 'allowFrom', 'groupAllowFrom'],
   behavior: ['interimMessages', 'interimRecall', 'interimRecallMs', 'sendErrorNotice', 'unknownCommand', 'rateLimitPerMinute', 'newMessagePolicy', 'autoSteerPolicy', 'deferredTimeoutMs'],
   diagnostics: ['actionAuditEnabled', 'traceEnabled'],
@@ -81,6 +81,7 @@ export const SCHEMA_DEFAULTS: Readonly<Record<string, unknown>> = {
   url: 'ws://127.0.0.1:3001',
   accessToken: '',
   botQQ: '',
+  botName: '',
   // W7：会话默认工作区路径（schema 默认 ''，src/index.ts:287——留空 = 宿主进程 cwd）。
   workspacePath: '',
   requireMention: true,
@@ -135,7 +136,7 @@ const NUMBER_RANGE: Readonly<Record<string, readonly [number, number | undefined
 const BOOLEAN_KEYS: readonly string[] = [
   'requireMention', 'allowAllUsers', 'interimMessages', 'interimRecall', 'sendErrorNotice',
   'actionAuditEnabled', 'traceEnabled', ]
-const STRING_KEYS: readonly string[] = ['host', 'url', 'accessToken', 'botQQ', 'workspacePath']
+const STRING_KEYS: readonly string[] = ['host', 'url', 'accessToken', 'botQQ', 'botName', 'workspacePath']
 const STRING_ARRAY_KEYS: readonly string[] = ['adminUsers', 'allowFrom', 'groupAllowFrom']
 /** 全部 25 键（校验与快照的唯一键集；6 枚举 + 4 数字 + 11 布尔 + 5 字符串 + 3 字符串数组）。 */
 export const ALL_KEYS: readonly string[] = [
@@ -351,7 +352,8 @@ export function validatePatch(patch: unknown): Record<string, unknown> {
       if (typeof value === 'boolean') clean[key] = value
       else issues.push(`${key} 必须是布尔值`)
     } else if (STRING_KEYS.includes(key)) {
-      if (typeof value === 'string') clean[key] = value
+      if (typeof value === 'string' && (key !== 'botName' || value.length <= 64)) clean[key] = value
+      else if (key === 'botName' && typeof value === 'string') issues.push('botName 最多 64 个字符')
       else issues.push(`${key} 必须是字符串`)
     } else if (STRING_ARRAY_KEYS.includes(key)) {
       if (Array.isArray(value) && value.every((item) => typeof item === 'string')) clean[key] = value

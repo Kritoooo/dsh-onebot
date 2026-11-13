@@ -18,6 +18,8 @@ export declare function stripAcpNoise(text: string): string;
 /** Options for an explicit outbound send (from tools). */
 export interface SendOptions {
     replyTo?: string;
+    /** Internal final-send check; evaluated at the last wire boundary. */
+    guard?: () => boolean;
     /** Queue the send for resend on reconnect instead of failing while the
      * connection is down. Only for model final replies; interim sends carry
      * recall timers + bookkeeping and must never be replayed. */
@@ -179,6 +181,8 @@ export declare class OutboundPipeline {
      * @returns the sent message id.
      */
     sendSegments(chatId: ChatId, segments: OutboundSegment[]): Promise<string | undefined>;
+    /** One final text bubble, no forward/card/splitting and no reconnect queue. */
+    sendProactive(chatId: ChatId, text: string, guard: () => boolean): Promise<string | undefined>;
     /** B8d: per-chat send chains owned by the pipeline (decoupled from the
      * registry's chat lifecycle — unregistered chats serialize too, the
      * original C6b ask). Entries clean themselves up once settled so evicted

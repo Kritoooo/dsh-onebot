@@ -112,6 +112,9 @@ export interface InboundContext {
      * itself) bypass the mute and the unlock can never be swallowed. Optional:
      * absent = the host has no silencing wiring (pre-T3 behavior). */
     isSilenced?(chatId: ChatId): boolean;
+    /** Passive observation after access and verified-quote gates, before mention drops. */
+    observeGroup?(inbound: NormalizedInbound, direct: boolean): void;
+    onGroupDispatched?(inbound: NormalizedInbound): void;
     /** Message body assembly (bridge facade: overridable, see the pipeline-order test). */
     buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>;
     /** Quote expansion via the overridable bridge facade; a verified response

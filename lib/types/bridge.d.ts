@@ -18,6 +18,7 @@ import { type NoticeTexts } from './notices.js';
 import type { OutboundSegment, SendOptions } from './outbound.js';
 import type { TraceSink } from './trace.js';
 import type { TraceStage } from './trace.js';
+import type { ProactiveConfig } from './proactive.js';
 /** T2 (P1): the queue notice sent to a chat when a message arrives while its
  * task is running under the default 'queue' policy — at most ONE per running
  * turn (the flag resets at turn/end) so a burst of queued messages never
@@ -25,7 +26,9 @@ import type { TraceStage } from './trace.js';
 export declare const QUEUE_NOTICE_TEXT = "\u23F3 \u5F53\u524D\u4EFB\u52A1\u8FD0\u884C\u4E2D\uFF0C\u65B0\u6D88\u606F\u5DF2\u6392\u961F\uFF0C\u5C06\u5728\u5F53\u524D\u4EFB\u52A1\u7ED3\u675F\u540E\u4F9D\u6B21\u5904\u7406\u3002";
 /** Resolved runtime configuration for the bridge. */
 export interface BridgeConfig {
+    proactive?: ProactiveConfig;
     botQQ: string;
+    botName?: string;
     ignoreSelf: boolean;
     requireMention: boolean;
     /** Unknown slash-command handling (R1): 'intercept' (default) consumes the
@@ -225,6 +228,8 @@ export declare class ChatBridge {
     /** Interim domain (D1-PR5): the assistant/message interim routing, the
      * per-message recall timers and the turn/end settlement. */
     private readonly interim;
+    private readonly proactive;
+    private readonly identity;
     /** T3 (P2): the deferred-delivery tracker (超时补发) — timeout timers, the
      * JSONL registry, bounded send retries and restart recovery. */
     private readonly deferred;
@@ -309,6 +314,8 @@ export declare class ChatBridge {
      * @returns the sent message ids.
      */
     sendToChat(chatId: ChatId, text: string, options?: SendOptions): Promise<string[]>;
+    /** Recall notices only invalidate local speculative context; they do not dispatch turns. */
+    handleNotice(event: OneBotEvent): void;
     /**
      * Send raw OneBot segments (used by the media tools).
      * @param chatId - target chat.

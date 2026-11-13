@@ -20,6 +20,7 @@ import { MediaStore } from '../../src/media.js'
 import { Transcriber } from '../../src/stt.js'
 import { TraceSink } from '../../src/trace.js'
 import type { NoticeTexts } from '../../src/notices.js'
+import type { ProactiveConfig } from '../../src/proactive.js'
 
 /** dsh 0.2.2 host-faithful Agent.model stub: current() returns the last
  * recorded selection, else the agentOptions fallback (provider/model), else
@@ -40,7 +41,7 @@ function makeFakeModel(agentOptions?: { provider?: string; model?: string }) {
 /** A fake agent handle for the bridge. */
 export function makeFakeAgents(
   sessionIds: string[],
-  captured: { followups: Array<{ text: string; sessionId: string }>; steers?: Array<{ text: string; sessionId: string }>; createdMeta?: Array<{ cwd?: string; agentPreset?: string }> },
+  captured: { followups: Array<{ text: string; sessionId: string }>; steers?: Array<{ text: string; sessionId: string }>; createdMeta?: Array<{ cwd?: string; agentPreset?: string }>; promptSections?: Array<{ name: string; text?: unknown }> },
   opts?: { failCreateFor?: string; resumeOk?: boolean; createDelayMs?: number },
 ) {
   const disposed: string[] = []
@@ -78,7 +79,7 @@ export function makeFakeAgents(
             captured.agentListeners?.push({ event, listener })
             return () => undefined
           },
-          systemPrompt: { section: (s: { name: string }) => { captured.channelSections?.push(s.name); return () => undefined } },
+          systemPrompt: { section: (s: { name: string; text?: unknown }) => { captured.channelSections?.push(s.name); captured.promptSections?.push(s); return () => undefined } },
           tools: { register: (t: { name: string }) => { captured.channelTools?.push(t.name); return () => undefined } },
         }
         await options.setup(agentCtx)
@@ -114,10 +115,10 @@ export function makeFakeAgents(
 }
 
 /** Full bridge + WS harness: inbound via real WebSocket, outbound captured. */
-export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void; notices?: NoticeTexts; monoFamilies?: readonly string[]; allowPrivateHosts?: boolean; respond?: Record<string, (params: Record<string, unknown>) => unknown>; }) {
+export async function makeHarness(opts?: { botName?: string; proactive?: ProactiveConfig; memberTools?: 'none' | 'all'; maxQuoteDepth?: number; failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void; notices?: NoticeTexts; monoFamilies?: readonly string[]; allowPrivateHosts?: boolean; respond?: Record<string, (params: Record<string, unknown>) => unknown>; }) {
   const ctx = new Context()
   const sessionIds: string[] = []
-  const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[], agentListeners: [] as Array<{ event: string; listener: (request: unknown, next: () => Promise<unknown>) => unknown }> }
+  const captured = { promptSections: [] as Array<{ name: string; text?: unknown }>, followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[], agentListeners: [] as Array<{ event: string; listener: (request: unknown, next: () => Promise<unknown>) => unknown }> }
   const agents = makeFakeAgents(sessionIds, captured, opts)
   const sessions = { flush: vi.fn(async () => undefined) }
   const mediaDir = opts?.mediaDir ?? mkdtempSync(join(tmpdir(), 'onebot-test-'))
@@ -136,7 +137,8 @@ export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor
     defaultModel: undefined,
     // T2-B3: the host userQuestions service stub (absent = no interception).
     config: {
-      botQQ: '10002', ignoreSelf: opts?.ignoreSelf ?? false, requireMention: true,
+      botQQ: '10002', botName: opts?.botName, ignoreSelf: opts?.ignoreSelf ?? false, requireMention: true,
+      proactive: opts?.proactive, permissions: { memberTools: opts?.memberTools ?? 'none' },
       interimMessages: opts?.interimMessages ?? true, sendErrorNotice: true, restrictedMemberPrefix: false,
       sensitivePatterns: [], mediaDir, maxImageBytes: opts?.maxImageBytes ?? 8 * 1024 * 1024,
       maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
@@ -160,13 +162,16 @@ export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor
     },
     log: (level: string, message: string) => opts?.log?.(level, message),
   })
-  if (opts?.respond !== undefined) {
+  {
     // Action-level canned responses (SnowLuma adaptation tests): intercept
     // before the real WS round-trip, same seam as makeCmdHarness's ocr stub.
     const real = connection.call.bind(connection)
     connection.call = (async (action: string, params: Record<string, unknown>) => {
-      const respond = opts.respond?.[action]
+      const respond = opts?.respond?.[action]
       if (respond !== undefined) return respond(params)
+      if (action === 'get_login_info') return { user_id: 10002, nickname: '测试机器人' }
+      if (action === 'get_stranger_info') return { user_id: 10002, nickname: '测试机器人' }
+      if (action === 'get_group_member_info') return { user_id: 10002, nickname: '测试群昵称', card: '' }
       return await real(action, params)
     }) as never
   }
@@ -194,7 +199,7 @@ export async function makeHarness(opts?: { maxQuoteDepth?: number; failCreateFor
       sender: { user_id: 10001, nickname: '小明' },
     }))
   }
-  return { ctx, sessionIds, captured, sessions, mediaDir, connection, bridge, client, outbound, sendText }
+  return { ctx, sessionIds, captured, sessions, mediaDir, connection, bridge, client, outbound, sendText, agents }
 }
 
 export function makeEvent(type: string, data: unknown): SessionEvent {

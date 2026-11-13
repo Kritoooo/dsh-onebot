@@ -59,6 +59,8 @@ export interface ChatAgent {
     lastNickname: string;
     /** Roles of dispatched turns not yet opened (FIFO, consumed at turn/start). */
     pendingTurnRoles: UserRole[];
+    pendingTurnProactive?: boolean[];
+    activeTurnProactive?: boolean;
     /** Role of the currently running turn; stays 'member' (fail-closed) until a
      * turn/start assigns the head of pendingTurnRoles. */
     activeTurnRole: UserRole;
